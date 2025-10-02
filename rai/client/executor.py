@@ -1,11 +1,12 @@
 """Execute actions returned by the RAI parser on Windows systems."""
 from __future__ import annotations
 
-import logging
 import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Dict, Optional
+
+from .logging_utils import get_logger
 
 try:  # pywin32 is optional.
     import win32con  # type: ignore
@@ -22,7 +23,7 @@ ExecutionResult = Dict[str, str]
 
 ActionHandler = Callable[[ExecutionPayload], ExecutionResult]
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = get_logger(__name__)
 
 
 def _is_windows() -> bool:

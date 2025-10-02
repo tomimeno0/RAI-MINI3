@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import time
 import unicodedata
@@ -12,8 +11,9 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from .db_utils import DB_PATH, ensure_schema, load_apps  # FIX: source DB helpers from shared server utilities
+from .logging_utils import get_logger
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = get_logger(__name__)
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 SYSTEM_PROMPT_FILE = PROMPTS_DIR / "system.txt"
@@ -342,6 +342,10 @@ def _rule_based_parse(
 
 
 def build_error(message: str, original_text: str) -> Dict[str, object]:
+    _LOGGER.error(
+        "Generando payload de error en parser",
+        extra={"message": message, "text": original_text},
+    )
     return {
         "action": "error",
         "app_name": None,
