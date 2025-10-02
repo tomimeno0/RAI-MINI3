@@ -6,9 +6,7 @@ helper returns a structured dictionary that callers can forward to the HUD.
 """
 from __future__ import annotations
 
-import ctypes
-from ctypes import wintypes
-import logging
+
 import subprocess
 import sys
 import time
@@ -16,7 +14,6 @@ import uuid
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-try:  # pywin32 is optional when running on Windows hosts.
     import win32con  # type: ignore
     import win32gui  # type: ignore
     import win32process  # type: ignore
@@ -33,9 +30,6 @@ else:  # pragma: no cover - we do not exercise win32 paths on non Windows.
     _USER32 = _KERNEL32 = None
 
 _LOGGER = logging.getLogger(__name__)
-
-
-ResultDict = Dict[str, Optional[object]]
 
 
 def _is_windows() -> bool:
