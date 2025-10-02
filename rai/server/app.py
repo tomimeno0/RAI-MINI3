@@ -9,9 +9,13 @@ from typing import Dict, Tuple
 
 from flask import Flask, request
 
-from ..client.scanner import scan_and_update_db  # FIX: reuse scanner to refresh catalogue
-from . import moduler
-from .db_utils import DB_PATH, ensure_schema, load_apps  # FIX: share DB helpers with server modules
+from . import moduler  # FIX: import parser module locally
+from .db_utils import (  # FIX: source DB helpers locally to decouple from client package
+    DB_PATH,  # FIX: shared database path constant
+    ensure_schema,  # FIX: schema management helper
+    load_apps,  # FIX: catalogue loader utility
+    scan_and_update_db,  # FIX: scanner bridge for rescan endpoint
+)
 
 LOG_PATH = Path(__file__).resolve().parents[2] / "logs" / "server.log"
 _LOGGER = logging.getLogger(__name__)
