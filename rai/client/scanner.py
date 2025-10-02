@@ -512,12 +512,6 @@ def _build_payload(apps: List[Dict[str, object]]) -> Dict[str, object]:
 def _send_payload(url: str, payload: Dict[str, object]) -> str:
     import urllib.error
     import urllib.request
-
-    trace_id = uuid.uuid4().hex
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", TRACE_HEADER: trace_id},
         method="POST",
     )
     with with_trace_id(LOGGER, trace_id) as log:

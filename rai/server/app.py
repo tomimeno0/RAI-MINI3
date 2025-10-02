@@ -1,9 +1,6 @@
 """Flask app exposing command parsing and catalogue endpoints."""  # FIX: document expanded API surface
 from __future__ import annotations
 
-import time
-import uuid
-from typing import Dict
 
 from flask import Flask, Response, jsonify, request
 
@@ -19,6 +16,33 @@ from .logging_utils import TRACE_HEADER, get_logger, with_trace_id
 
 _LOGGER = get_logger(__name__)
 
+_ALLOWED_ORIGINS = tuple(
+    origin.strip()
+    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "*").split(",")
+    if origin.strip()
+) or ("*",)
+_API_KEY = os.environ.get("RAI_SERVER_API_KEY")
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        _LOGGER.warning("Valor inválido para %s=%s; usando %s", name, raw, default)
+        return default
+
+
+_RATE_LIMIT_PER_MINUTE = max(_env_int("RATE_LIMIT_REQUESTS_PER_MINUTE", 0), 0)
+_RATE_LIMIT_BURST = max(_env_int("RATE_LIMIT_BURST", 0), 0)
+_RATE_LIMIT_WINDOW = 60.0
+_RATE_LIMIT_CAP = (
+    _RATE_LIMIT_PER_MINUTE + _RATE_LIMIT_BURST if _RATE_LIMIT_PER_MINUTE else 0
+)
+_RATE_LIMIT_BUCKETS: Dict[str, Deque[float]] = defaultdict(deque)
+
 
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -26,80 +50,18 @@ def create_app() -> Flask:
 
     @app.after_request  # FIX: inject CORS headers on every response
     def add_cors_headers(response):  # type: ignore[override]
-        response.headers.setdefault("Access-Control-Allow-Origin", "*")
-        response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type")
+        origin = request.headers.get("Origin")
+        allowed = _resolve_cors_origin(origin)
+        if allowed:
+            response.headers.setdefault("Access-Control-Allow-Origin", allowed)
+        response.headers.setdefault(
+            "Access-Control-Allow-Headers", "Content-Type,X-RAI-API-Key"
+        )
         response.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, OPTIONS")  # FIX: allow catalogue routes
         return response
 
     @app.route("/parse", methods=["POST"])  # FIX: parsing endpoint configuration
-    def parse_endpoint() -> Response:
-        trace_id = _extract_trace_id()
-        with with_trace_id(_LOGGER, trace_id) as log:
-            if not request.is_json:
-                log.warning("Solicitud sin JSON")
-                return _build_response(json_error("Esperaba JSON", "content-type"), 400, trace_id)
 
-            payload: Dict[str, object] = request.get_json(force=True)
-            text = str(payload.get("text", "")).strip()
-            apps = payload.get("apps")
-            if not text:
-                log.warning("Solicitud sin texto")
-                return _build_response(moduler.build_error("No recibí texto", ""), 400, trace_id)
-
-            start = time.time()
-            try:
-                result = moduler.parse(
-                    text,
-                    apps_catalogue=apps if isinstance(apps, list) else None,
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                log.exception("Error en parser")
-                return _build_response(
-                    json_error("Algo salió mal parseando la orden", str(exc)),
-                    500,
-                    trace_id,
-                )
-
-            latency = (time.time() - start) * 1000
-            if not moduler.validate_contract(result):
-                log.error("Respuesta fuera de contrato", extra={"result": result})
-                result = moduler.build_error("Solo controlo apps, por ahora.", text)
-
-            log.info(
-                "Parse completado",
-                extra={
-                    "latency_ms": round(latency, 2),
-                    "action": result.get("action"),
-                    "app_name": result.get("app_name"),
-                },
-            )
-            return _build_response(result, 200, trace_id)
-
-    @app.route("/apps", methods=["GET"])  # FIX: expose catalogue listing endpoint
-    def list_apps() -> Response:  # FIX: serve GET /apps responses
-        trace_id = _extract_trace_id()
-        with with_trace_id(_LOGGER, trace_id) as log:
-            catalogue = load_apps(DB_PATH)  # FIX: serve latest catalogue snapshot
-            log.info("Catálogo solicitado", extra={"entries": len(catalogue)})
-            return _build_response({"apps": catalogue}, 200, trace_id)  # FIX: respond with catalogue payload
-
-    @app.route("/apps/scan", methods=["POST"])  # FIX: expose manual rescan endpoint
-    def scan_apps() -> Response:  # FIX: trigger catalogue refresh
-        trace_id = _extract_trace_id()
-        with with_trace_id(_LOGGER, trace_id) as log:
-            start = time.time()  # FIX: measure scan latency
-            try:
-                scan_and_update_db(DB_PATH)  # FIX: trigger rescan using shared database
-            except Exception as exc:  # pragma: no cover - defensive
-                log.exception("Error escaneando apps")  # FIX: log scan failure
-                return _build_response(
-                    json_error("No pude actualizar el catálogo", str(exc)),
-                    500,
-                    trace_id,
-                )
-            latency = (time.time() - start) * 1000  # FIX: compute scan duration in ms
-            log.info("Escaneo completado", extra={"latency_ms": round(latency, 2)})
-            return _build_response({"apps": load_apps(DB_PATH)}, 200, trace_id)
 
     @app.route("/health", methods=["GET"])  # FIX: expose health-check endpoint
     def health() -> Response:  # FIX: serve health responses
@@ -110,20 +72,11 @@ def create_app() -> Flask:
     return app
 
 
-def _extract_trace_id() -> str:
-    incoming = request.headers.get(TRACE_HEADER)
-    return incoming or uuid.uuid4().hex
-
-
-def _build_response(payload: Dict[str, object], status: int, trace_id: str) -> Response:
-    response = jsonify(payload)
-    response.status_code = status
-    response.headers[TRACE_HEADER] = trace_id
-    return response
-
 
 app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5050)
+    host = os.environ.get("RAI_SERVER_HOST", "127.0.0.1")
+    port = _env_int("RAI_SERVER_PORT", 5050)
+    app.run(host=host, port=port)

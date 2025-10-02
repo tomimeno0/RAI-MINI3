@@ -1,11 +1,7 @@
 """Shared SQLite helpers for the server components."""
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
-from typing import Dict, List
 
-from server.init_db import DEFAULT_DB_PATH as DEFAULT_SERVER_DB_PATH, apply_migrations, get_logger
 
 DB_PATH = Path(DEFAULT_SERVER_DB_PATH)
 _LOGGER = get_logger()

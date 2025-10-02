@@ -10,7 +10,6 @@ from urllib import request
 from . import audio, executor, scanner
 from .logging_utils import TRACE_HEADER, get_logger, with_trace_id
 
-SERVER_URL = "http://127.0.0.1:5050/parse"
 
 LOGGER = get_logger(__name__)
 
@@ -26,30 +25,7 @@ def send_to_server(text: str, apps_catalogue: Optional[list], trace_id: str) -> 
     if apps_catalogue:
         payload["apps"] = apps_catalogue
     data = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json", TRACE_HEADER: trace_id}
-    req = request.Request(SERVER_URL, data=data, headers=headers)
-    with with_trace_id(LOGGER, trace_id) as log:
-        try:
-            with request.urlopen(req, timeout=10) as response:
-                charset = response.headers.get_content_charset("utf-8")
-                body = response.read().decode(charset)
-                response_trace = response.headers.get(TRACE_HEADER, trace_id)
-                if response_trace != trace_id:
-                    log.warning(
-                        "Trace ID distinto en respuesta", extra={"response_trace": response_trace}
-                    )
-                log.info("Respuesta recibida", extra={"status": response.status})
-                return json.loads(body), response_trace
-        except Exception as exc:
-            log.error("Error llamando al parser", extra={"error": str(exc)})
-            return (
-                {
-                    "action": "error",
-                    "speak": "No pude comunicarme con el parser. ¿Está el servidor encendido?",
-                    "notes": str(exc),
-                },
-                trace_id,
-            )
+
 
 
 def main() -> None:
