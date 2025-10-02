@@ -2,57 +2,62 @@
 from __future__ import annotations
 
 import json
-import logging
 import sys
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
-from typing import Dict, Optional
+import uuid
+from typing import Dict, Optional, Tuple
 from urllib import request
 
 from . import audio, executor, scanner
+from .logging_utils import TRACE_HEADER, get_logger, with_trace_id
 
-LOG_PATH = Path(__file__).resolve().parents[2] / "logs" / "client.log"
 SERVER_URL = "http://127.0.0.1:5050/parse"
+
+LOGGER = get_logger(__name__)
 
 
 def configure_logging() -> None:
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(LOG_PATH, maxBytes=512_000, backupCount=3)
-    formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s :: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    handler.setFormatter(formatter)
-    logging.basicConfig(level=logging.INFO, handlers=[handler, logging.StreamHandler()])
+    """Ensure logging handlers are configured."""
+
+    get_logger(__name__)
 
 
-def send_to_server(text: str, apps_catalogue: Optional[list]) -> Dict[str, object]:
+def send_to_server(text: str, apps_catalogue: Optional[list], trace_id: str) -> Tuple[Dict[str, object], str]:
     payload = {"text": text}
     if apps_catalogue:
         payload["apps"] = apps_catalogue
     data = json.dumps(payload).encode("utf-8")
-    req = request.Request(SERVER_URL, data=data, headers={"Content-Type": "application/json"})
-    try:
-        with request.urlopen(req, timeout=10) as response:
-            charset = response.headers.get_content_charset("utf-8")
-            body = response.read().decode(charset)
-            return json.loads(body)
-    except Exception as exc:
-        logging.getLogger(__name__).error("Error llamando al parser: %s", exc)
-        return {
-            "action": "error",
-            "speak": "No pude comunicarme con el parser. ¿Está el servidor encendido?",
-            "notes": str(exc),
-        }
+    headers = {"Content-Type": "application/json", TRACE_HEADER: trace_id}
+    req = request.Request(SERVER_URL, data=data, headers=headers)
+    with with_trace_id(LOGGER, trace_id) as log:
+        try:
+            with request.urlopen(req, timeout=10) as response:
+                charset = response.headers.get_content_charset("utf-8")
+                body = response.read().decode(charset)
+                response_trace = response.headers.get(TRACE_HEADER, trace_id)
+                if response_trace != trace_id:
+                    log.warning(
+                        "Trace ID distinto en respuesta", extra={"response_trace": response_trace}
+                    )
+                log.info("Respuesta recibida", extra={"status": response.status})
+                return json.loads(body), response_trace
+        except Exception as exc:
+            log.error("Error llamando al parser", extra={"error": str(exc)})
+            return (
+                {
+                    "action": "error",
+                    "speak": "No pude comunicarme con el parser. ¿Está el servidor encendido?",
+                    "notes": str(exc),
+                },
+                trace_id,
+            )
 
 
 def main() -> None:
     configure_logging()
-    log = logging.getLogger(__name__)
-    log.info("Iniciando cliente RAI")
+    LOGGER.info("Iniciando cliente RAI")
 
-    apps = scanner.scan_and_update_db()
-    log.info("Catálogo inicial: %s entradas", len(apps))
+    apps = scanner.scan_apps()
+    LOGGER.info("Catálogo inicial", extra={"entries": len(apps)})
 
     listener = audio.AudioInputManager()
     print("RAI listo. Decí 'hola rai' o presioná Enter para hablar.")
@@ -79,18 +84,22 @@ def main() -> None:
                 print("¡Hasta luego!")
                 break
 
-            log.info("Comando capturado: %s", command_text)
-            response = send_to_server(command_text, apps)
+            trace_id = uuid.uuid4().hex
+            with with_trace_id(LOGGER, trace_id) as log:
+                log.info("Comando capturado", extra={"command": command_text})
+                response, response_trace = send_to_server(command_text, apps, trace_id)
             speak = response.get("speak") or "Listo"
             print(speak)
-            log.info("Respuesta parser: %s", response)
+            with with_trace_id(LOGGER, response_trace) as log:
+                log.info("Respuesta parser", extra={"response": response})
 
-            if response.get("action") == "listar_apps":
-                _print_available_apps(apps)
-                continue
+                if response.get("action") == "listar_apps":
+                    _print_available_apps(apps)
+                    continue
 
-            exec_result = executor.execute({k: response.get(k) for k in response.keys()})
-            log.info("Resultado ejecución: %s", exec_result)
+                exec_payload = {k: response.get(k) for k in response.keys()}
+                exec_result = executor.execute(exec_payload)
+                log.info("Resultado ejecución", extra={"result": exec_result})
     finally:
         listener.close()
 
