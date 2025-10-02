@@ -9,14 +9,16 @@ import argparse
 import dataclasses
 import hashlib
 import json
-import logging
 import os
 import socket
 import subprocess
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
+
+from .logging_utils import TRACE_HEADER, get_logger, with_trace_id
 
 __all__ = ["scan_apps"]
 
@@ -24,8 +26,6 @@ __all__ = ["scan_apps"]
 # Configuración global
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
-LOG_DIR = BASE_DIR.parent / "logs"
-LOG_PATH = LOG_DIR / "client_scanner.log"
 CACHE_PATH = BASE_DIR / "scanner_cache.json"
 
 SCAN_DIRECTORIES: Tuple[Path, ...] = (
@@ -50,13 +50,7 @@ SUSPICIOUS_PATTERNS: Tuple[str, ...] = (
     "\\Users\\Public\\",
 )
 
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    filename=str(LOG_PATH),
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-LOGGER = logging.getLogger(__name__)
+LOGGER = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -487,23 +481,25 @@ def scan_apps(full: bool = True, cache_path: Path = CACHE_PATH) -> List[Dict[str
       3-6 segundos, aunque puede extenderse si existen muchos ejecutables.
     """
 
-    if not sys.platform.startswith("win32"):
-        LOGGER.warning("Escaneo completo disponible únicamente en Windows")
-        return []
+    trace_id = uuid.uuid4().hex
+    with with_trace_id(LOGGER, trace_id) as log:
+        if not sys.platform.startswith("win32"):
+            log.warning("Escaneo completo disponible únicamente en Windows")
+            return []
 
-    LOGGER.info("Inicio de escaneo (%s)", "full" if full else "incremental")
-    apps: List[AppInfo] = []
-    apps.extend(_collect_executables())
-    apps.extend(_collect_uwp_apps())
+        log.info("Inicio de escaneo", extra={"mode": "full" if full else "incremental"})
+        apps: List[AppInfo] = []
+        apps.extend(_collect_executables())
+        apps.extend(_collect_uwp_apps())
 
-    deduped = _deduplicate(apps)
+        deduped = _deduplicate(apps)
 
-    if full:
-        _save_cache(cache_path, deduped)
-        return [app.to_dict() for app in deduped]
+        if full:
+            _save_cache(cache_path, deduped)
+            return [app.to_dict() for app in deduped]
 
-    filtered = _filter_incremental(deduped, cache_path)
-    return [app.to_dict() for app in filtered]
+        filtered = _filter_incremental(deduped, cache_path)
+        return [app.to_dict() for app in filtered]
 
 
 # ---------------------------------------------------------------------------
@@ -513,26 +509,19 @@ def _build_payload(apps: List[Dict[str, object]]) -> Dict[str, object]:
     return {"host": socket.gethostname(), "apps": apps}
 
 
-def _send_payload(url: str, payload: Dict[str, object]) -> None:
+def _send_payload(url: str, payload: Dict[str, object]) -> str:
     import urllib.error
     import urllib.request
-
-    headers = {"Content-Type": "application/json"}
-    api_key = os.environ.get("RAI_SERVER_API_KEY")
-    if api_key:
-        headers["X-RAI-API-Key"] = api_key
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers=headers,
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            LOGGER.info("Payload enviado, status %s", response.status)
-    except urllib.error.URLError as exc:
-        LOGGER.error("Error enviando payload a %s: %s", url, exc)
-        raise
+    with with_trace_id(LOGGER, trace_id) as log:
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                log.info("Payload enviado", extra={"status": response.status})
+        except urllib.error.URLError as exc:
+            log.error("Error enviando payload", extra={"url": url, "error": str(exc)})
+            raise
+    return trace_id
 
 
 def main(argv: Optional[List[str]] = None) -> int:
