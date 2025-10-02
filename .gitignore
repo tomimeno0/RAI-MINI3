@@ -1,3 +1,5 @@
 __pycache__/
 *.py[cod]
 rai/server_db/*.sqlite
+logs/
+server/*.sqlite*

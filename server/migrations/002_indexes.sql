@@ -1,0 +1,13 @@
+CREATE INDEX idx_hosts_hostname ON hosts(hostname);
+CREATE INDEX idx_apps_catalog_norm ON apps_catalog(normalized_name);
+CREATE INDEX idx_apps_catalog_publisher ON apps_catalog(publisher);
+CREATE UNIQUE INDEX idx_installs_host_package ON installs(host_id, package_id) WHERE package_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_installs_host_binary ON installs(host_id, binary_id) WHERE binary_id IS NOT NULL;
+CREATE INDEX idx_installs_active ON installs(host_id, is_active) WHERE is_active = 1;
+CREATE INDEX idx_binaries_publisher ON binaries(publisher);
+CREATE INDEX idx_binaries_hash ON binaries(file_hash);
+CREATE INDEX idx_packages_publisher ON packages(publisher);
+CREATE INDEX idx_scan_items_host ON scan_items(host_id);
+CREATE INDEX idx_scan_items_name ON scan_items(raw_name);
+CREATE INDEX idx_scan_items_publisher ON scan_items(raw_publisher);
+CREATE INDEX idx_security_findings_created ON security_findings(created_at);
