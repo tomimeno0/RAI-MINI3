@@ -3,7 +3,7 @@
 This module prepares the prompt stack for the LLM and exposes :func:`interpret`
 which orchestrates intent classification, application resolution and response
 formatting. The LLM call is intentionally abstracted behind :func:`call_llm` so
-integrators can plug Cohere (u otra opción) without leaking credentials.
+integrators can plug Cohere (u otra opción) without leaking credenciales.
 
 Notas para desarrolladores:
 - Agregá o ajustá ejemplos few-shot editando ``server/prompts/fewshot.jsonl``;
@@ -14,11 +14,17 @@ Notas para desarrolladores:
 from __future__ import annotations
 
 import json
+import logging
+import re
+import sqlite3
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from .logging_utils import get_logger
 
 
 _LOGGER = get_logger(__name__)
@@ -380,6 +386,18 @@ def _llm_infer(
         notes=notes,
         from_llm=True,
     )
+
+
+def _detect_action(words: Sequence[str]) -> Optional[str]:
+    for word in words:
+        candidate = _normalize_text(word)
+        if candidate in VALID_ACTIONS:
+            return candidate
+        if candidate in ACTION_SYNONYMS:
+            mapped = ACTION_SYNONYMS[candidate]
+            if mapped in VALID_ACTIONS:
+                return mapped
+    return None
 
 
 def _rule_based_infer(text: str, normalized: str) -> IntentGuess:
