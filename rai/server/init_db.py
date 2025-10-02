@@ -1,20 +1,18 @@
-"""Initialise the SQLite database and optionally trigger a scan."""
+"""Compatibility wrapper around the deployment migration runner."""
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
-from .db_utils import DB_PATH, ensure_schema, scan_and_update_db  # FIX: use shared server utilities
-
-logging.basicConfig(level=logging.INFO)
+from .db_utils import DB_PATH, ensure_schema, scan_and_update_db
 
 
 def init(db_path: Path | None = None, run_scan: bool = True) -> None:
-    path = db_path or DB_PATH  # FIX: resolve database path using shared constant
-    logging.info("Inicializando base de datos en %s", path)
-    ensure_schema(path)  # FIX: prepare schema via shared helper
+    """Initialise the database and optionally trigger a scan."""
+
+    target = db_path or DB_PATH
+    ensure_schema(target)
     if run_scan:
-        scan_and_update_db(path)  # FIX: trigger scanner via shared wrapper
+        scan_and_update_db(target)
 
 
 if __name__ == "__main__":
