@@ -1,11 +1,17 @@
 """Shared SQLite helpers for the server components."""  # FIX: provide reusable database utilities
 from __future__ import annotations  # FIX: ensure future annotations support
 
+import os
 import sqlite3  # FIX: interact with SQLite database
 from pathlib import Path  # FIX: handle filesystem paths
 from typing import Dict, List  # FIX: provide precise typing aliases
 
-DB_PATH = Path(__file__).resolve().parents[1] / "server" / "apps.sqlite"  # FIX: canonical database path
+_DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "server" / "apps.sqlite"
+_ENV_DB_PATH = os.environ.get("DB_PATH")
+if _ENV_DB_PATH:
+    DB_PATH = Path(os.path.expandvars(_ENV_DB_PATH)).expanduser()
+else:
+    DB_PATH = _DEFAULT_DB_PATH
 
 
 def ensure_schema(path: Path = DB_PATH) -> None:  # FIX: create schema if missing

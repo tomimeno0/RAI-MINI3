@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -12,7 +13,8 @@ from urllib import request
 from . import audio, executor, scanner
 
 LOG_PATH = Path(__file__).resolve().parents[2] / "logs" / "client.log"
-SERVER_URL = "http://127.0.0.1:5050/parse"
+SERVER_URL = os.environ.get("RAI_SERVER_URL", "http://127.0.0.1:5050/parse")
+API_KEY = os.environ.get("RAI_SERVER_API_KEY")
 
 
 def configure_logging() -> None:
@@ -31,7 +33,10 @@ def send_to_server(text: str, apps_catalogue: Optional[list]) -> Dict[str, objec
     if apps_catalogue:
         payload["apps"] = apps_catalogue
     data = json.dumps(payload).encode("utf-8")
-    req = request.Request(SERVER_URL, data=data, headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["X-RAI-API-Key"] = API_KEY
+    req = request.Request(SERVER_URL, data=data, headers=headers)
     try:
         with request.urlopen(req, timeout=10) as response:
             charset = response.headers.get_content_charset("utf-8")

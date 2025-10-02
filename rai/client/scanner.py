@@ -517,10 +517,14 @@ def _send_payload(url: str, payload: Dict[str, object]) -> None:
     import urllib.error
     import urllib.request
 
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get("RAI_SERVER_API_KEY")
+    if api_key:
+        headers["X-RAI-API-Key"] = api_key
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:

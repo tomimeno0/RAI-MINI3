@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
+from collections import defaultdict, deque
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Deque, Dict, Tuple
 
 from flask import Flask, request
 
@@ -20,6 +22,33 @@ from .db_utils import (  # FIX: source DB helpers locally to decouple from clien
 LOG_PATH = Path(__file__).resolve().parents[2] / "logs" / "server.log"
 _LOGGER = logging.getLogger(__name__)
 
+_ALLOWED_ORIGINS = tuple(
+    origin.strip()
+    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "*").split(",")
+    if origin.strip()
+) or ("*",)
+_API_KEY = os.environ.get("RAI_SERVER_API_KEY")
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        _LOGGER.warning("Valor inválido para %s=%s; usando %s", name, raw, default)
+        return default
+
+
+_RATE_LIMIT_PER_MINUTE = max(_env_int("RATE_LIMIT_REQUESTS_PER_MINUTE", 0), 0)
+_RATE_LIMIT_BURST = max(_env_int("RATE_LIMIT_BURST", 0), 0)
+_RATE_LIMIT_WINDOW = 60.0
+_RATE_LIMIT_CAP = (
+    _RATE_LIMIT_PER_MINUTE + _RATE_LIMIT_BURST if _RATE_LIMIT_PER_MINUTE else 0
+)
+_RATE_LIMIT_BUCKETS: Dict[str, Deque[float]] = defaultdict(deque)
+
 
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -28,13 +57,26 @@ def create_app() -> Flask:
 
     @app.after_request  # FIX: inject CORS headers on every response
     def add_cors_headers(response):  # type: ignore[override]
-        response.headers.setdefault("Access-Control-Allow-Origin", "*")
-        response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type")
+        origin = request.headers.get("Origin")
+        allowed = _resolve_cors_origin(origin)
+        if allowed:
+            response.headers.setdefault("Access-Control-Allow-Origin", allowed)
+        response.headers.setdefault(
+            "Access-Control-Allow-Headers", "Content-Type,X-RAI-API-Key"
+        )
         response.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, OPTIONS")  # FIX: allow catalogue routes
         return response
 
     @app.route("/parse", methods=["POST"])  # FIX: parsing endpoint configuration
     def parse_endpoint() -> Tuple[Dict[str, object], int]:
+        auth_error = _authenticate_request()
+        if auth_error:
+            return auth_error
+
+        rate_error = _enforce_rate_limit()
+        if rate_error:
+            return rate_error
+
         if not request.is_json:
             return _json_error("Esperaba JSON", "content-type"), 400
 
@@ -66,11 +108,27 @@ def create_app() -> Flask:
 
     @app.route("/apps", methods=["GET"])  # FIX: expose catalogue listing endpoint
     def list_apps() -> Tuple[Dict[str, object], int]:  # FIX: serve GET /apps responses
+        auth_error = _authenticate_request()
+        if auth_error:
+            return auth_error
+
+        rate_error = _enforce_rate_limit()
+        if rate_error:
+            return rate_error
+
         catalogue = load_apps(DB_PATH)  # FIX: serve latest catalogue snapshot
         return {"apps": catalogue}, 200  # FIX: respond with catalogue payload
 
     @app.route("/apps/scan", methods=["POST"])  # FIX: expose manual rescan endpoint
     def scan_apps() -> Tuple[Dict[str, object], int]:  # FIX: trigger catalogue refresh
+        auth_error = _authenticate_request()
+        if auth_error:
+            return auth_error
+
+        rate_error = _enforce_rate_limit()
+        if rate_error:
+            return rate_error
+
         start = time.time()  # FIX: measure scan latency
         try:
             scan_and_update_db(DB_PATH)  # FIX: trigger rescan using shared database
@@ -103,6 +161,46 @@ def _json_error(message: str, notes: str) -> Dict[str, object]:
     }
 
 
+def _resolve_cors_origin(request_origin: str | None) -> str | None:
+    if "*" in _ALLOWED_ORIGINS:
+        return "*"
+    if request_origin and request_origin in _ALLOWED_ORIGINS:
+        return request_origin
+    return _ALLOWED_ORIGINS[0] if _ALLOWED_ORIGINS else None
+
+
+def _authenticate_request() -> Tuple[Dict[str, object], int] | None:
+    if not _API_KEY:
+        return None
+    provided = request.headers.get("X-RAI-API-Key") or request.args.get("api_key")
+    if provided != _API_KEY:
+        return _json_error("Solicitud no autorizada", "api_key"), 401
+    return None
+
+
+def _enforce_rate_limit() -> Tuple[Dict[str, object], int] | None:
+    if _RATE_LIMIT_CAP <= 0:
+        return None
+
+    identifier = request.remote_addr or "unknown"
+    bucket = _RATE_LIMIT_BUCKETS[identifier]
+    now = time.time()
+    while bucket and now - bucket[0] > _RATE_LIMIT_WINDOW:
+        bucket.popleft()
+
+    if len(bucket) >= _RATE_LIMIT_CAP:
+        return (
+            _json_error(
+                "Demasiadas solicitudes; esperá unos segundos e intentá nuevamente.",
+                "rate_limit",
+            ),
+            429,
+        )
+
+    bucket.append(now)
+    return None
+
+
 def _configure_logging() -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(LOG_PATH, maxBytes=512_000, backupCount=3)
@@ -123,4 +221,6 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5050)
+    host = os.environ.get("RAI_SERVER_HOST", "127.0.0.1")
+    port = _env_int("RAI_SERVER_PORT", 5050)
+    app.run(host=host, port=port)

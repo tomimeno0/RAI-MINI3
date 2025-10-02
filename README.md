@@ -1,134 +1,117 @@
-# RAI Mini (Windows)
+# RAI MINI3 – Setup para Windows 10/11
 
-Asistente por voz en modo CLI diseñado para Windows 10/11 sin privilegios de
-administrador. El cliente escucha la hotword **"hola rai"** (o usa teclado como
-fallback) y delega al servidor Flask la interpretación de órdenes para abrir,
-cerrar, minimizar, maximizar y enfocar aplicaciones detectadas en el sistema.
-
-## Estructura
-
-```
-rai/
-├─ client/
-│  ├─ main.py         # Loop principal (hotword/teclado → /parse → executor)
-│  ├─ audio.py        # Manejo de hotword y captura de comandos (voz/teclado)
-│  ├─ executor.py     # Ejecuta acciones en Windows (cmd + pywin32 opcional)
-│  └─ scanner.py      # Escanea EXE y UWP, persiste en SQLite
-├─ server/ <!-- # FIX: document shared server layout -->
-│  ├─ app.py          # API Flask /parse, /apps, /apps/scan y /health <!-- # FIX: detallar endpoints expuestos -->
-│  ├─ db_utils.py     # Utilidades compartidas para la base SQLite <!-- # FIX: incluir nuevo helper -->
-│  ├─ moduler.py      # Parser en español, usa la base de datos <!-- # FIX: mantener descripción -->
-│  ├─ init_db.py      # Inicializador y escaneo manual <!-- # FIX: mantener instrucción -->
-│  └─ apps.sqlite     # Base SQLite generada en runtime (se crea automáticamente) <!-- # FIX: reflejar nueva ubicación -->
-├─ logs/
-│  ├─ client.log
-│  └─ server.log
-└─ README.md
-```
+Asistente cliente-servidor minimalista para controlar aplicaciones en Windows. El objetivo de este documento es dejar el proyecto instalable y utilizable en equipos con Python 3.11 sin requerir privilegios de administrador.
 
 ## Requisitos
 
-- Python 3.11
-- Dependencias mínimas (`pip install -r requirements.txt` o manualmente):
-  - `Flask`
-  - `cohere` *(opcional, parser inteligente)*
-  - `SpeechRecognition` *(opcional, habilita voz)*
-  - `pyaudio` *(opcional, requerido por SpeechRecognition)*
-  - `pywin32` *(opcional, requerido para minimizar/maximizar/enfocar UIs)*
+- Windows 10/11 (64 bits).
+- [Python 3.11 (64 bits)](https://www.python.org/downloads/) instalado y agregado al `PATH`.
+- Git para clonar el repositorio.
+- PowerShell habilitado (viene por defecto en Windows; se usa para resolver accesos directos y listar apps UWP).
 
-Sin `SpeechRecognition`/`pyaudio` el cliente entra en **modo teclado** (Enter
-para hablar). Sin `pywin32`, las acciones de ventana devuelven un mensaje de
-“no disponible” y se registran en logs. Si falta `cohere`, el sistema cae al
-parser por reglas (menos preciso pero funcional).
+## Instalación express (4 comandos)
 
-## Instalación rápida
+| Orden | Comando | ¿Qué hace? |
+| --- | --- | --- |
+| 1 | `git clone <URL_DEL_REPO> && cd RAI-MINI3` | Clona el proyecto y abre la carpeta. |
+| 2 | `scripts\dev_setup.bat` | Crea `.venv`, instala `requirements.txt` y copia `.env.example` → `.env`. |
+| 3 | `scripts\run_server.bat` | Lee `.env`, exporta variables y lanza `python server/app.py` en `127.0.0.1:5050`. Dejalo abierto. |
+| 4 | `scripts\run_client_scan.bat` | Usa el mismo `.env`, ejecuta `client/scanner.py --full --send --url ...` y registra el primer escaneo. |
 
-```bash
-python -m venv .venv
-source .venv/Scripts/activate  # En PowerShell: .venv\Scripts\Activate.ps1
-pip install Flask cohere SpeechRecognition pyaudio pywin32
+> 💡 Ejecutá el paso 4 en una **segunda terminal** (el servidor debe seguir corriendo).
+
+## Checklist previo (fallas comunes)
+
+- [ ] Python 3.11 (64 bits) responde `python --version` = `3.11.x`. <sub>Si no, `dev_setup` fallará creando `.venv`.</sub>
+- [ ] `.env` actualizado con tu `RAI_SERVER_API_KEY` y la misma clave se usa en cliente/servidor. <sub>Si falta, verás respuestas 401 al escanear.</sub>
+- [ ] PowerShell permite ejecutar comandos sin restricciones. <sub>Si está bloqueado, el escáner omitirá UWP; ver troubleshooting.</sub>
+- [ ] (Opcional) `pywin32`/`pefile` instalados si querés metadatos avanzados. <sub>Sin ellos se emiten advertencias, pero el flujo continua.</sub>
+
+## Dependencias
+
+- `requirements.txt`: dependencias mínimas para producción (`Flask`).
+- `dev-requirements.txt`: extras para desarrollo (por defecto sólo `pytest`).
+- `scripts\dev_setup.bat` instala ambos archivos usando la venv `.venv`.
+
+## Configuración de variables (.env)
+
+El archivo `.env.example` incluye los valores necesarios. Copiálo a `.env` (lo hace `dev_setup` si no existe) y completá:
+
+| Variable | Descripción |
+| --- | --- |
+| `RAI_SERVER_API_KEY` | Clave compartida que el servidor espera en el header `X-RAI-API-Key`. Debe coincidir con el cliente. |
+| `DB_PATH` | Ruta del SQLite con el catálogo. Podés usar la relativa `rai\server\apps.sqlite` o una absoluta. |
+| `CORS_ALLOWED_ORIGINS` | Lista separada por comas con los orígenes permitidos. Usá `*` sólo en entornos controlados. |
+| `RATE_LIMIT_REQUESTS_PER_MINUTE` / `RATE_LIMIT_BURST` | Limitador en memoria por IP. Poné `0` para deshabilitarlo. |
+| `RAI_SERVER_URL` | Endpoint que usa el cliente para `POST /parse`. El script de escaneo deriva a `/apps/scan`. |
+
+Opcional: `RAI_SERVER_HOST` y `RAI_SERVER_PORT` redefinen el bind de Flask (por defecto `127.0.0.1:5050`).
+
+Las variables se cargan automáticamente al ejecutar los scripts `.bat`. Si `.env` no existe, los scripts continúan con valores por defecto y muestran una advertencia.
+
+## Setup detallado
+
+1. **Crear entorno**: `scripts\dev_setup.bat`
+   - Detecta `py -3.11` o `python` en el `PATH`.
+   - Crea `.venv` si no existe, actualiza `pip` e instala los requirements.
+   - Copia `.env.example` a `.env` y te recuerda completarlo.
+2. **Activar venv manualmente (opcional)**: `.\.venv\Scripts\Activate.ps1`
+3. **Instalar extras opcionales**: `.\.venv\Scripts\pip install pywin32 pefile speechrecognition pyaudio` si necesitás audio o metadatos avanzados.
+
+## Migraciones y base de datos
+
+La base SQLite se crea automáticamente al iniciar el servidor o al ejecutar un escaneo. Si querés forzar una inicialización manual dentro de la venv:
+
+```powershell
+.\.venv\Scripts\python.exe -m rai.server.init_db
 ```
 
-Si `pyaudio` da error, instalá la rueda compatible con tu versión de Python o
-omitilo y usá el modo teclado.
+El archivo se guarda en `DB_PATH`. Podés respaldarlo o apuntarlo a otra carpeta desde `.env`.
 
-## Integración con Cohere
+## Arranque del servidor
 
-El parser principal usa la API de Cohere. Configuración sugerida:
+- Script recomendado: `scripts\run_server.bat`
+  - Lee `.env`, exporta variables y lanza `python server/app.py` dentro de la venv.
+  - Logs en `logs\server.log`.
+- Alternativa manual:
 
-- Instalá la dependencia: `pip install cohere`.
-- Exportá la clave antes de levantar el servidor (PowerShell):
-  ```powershell
-  $env:COHERE_API_KEY = "tu_key"
-  ```
-- Modelo opcional via `COHERE_MODEL` (por defecto `command-r`).
-
-Si la clave no está definida o la librería no está instalada, el parser
-usa automáticamente el modo por reglas y lo informa en `logs/server.log`.
-
-## Inicializar base de datos
-
-El cliente ejecuta el scanner automáticamente al arrancar, pero podés forzarlo:
-
-```bash
-python -m rai.server.init_db
+```powershell
+setx RAI_SERVER_API_KEY "tu_clave"  # o usá $env:RAI_SERVER_API_KEY en la sesión actual
+.\.venv\Scripts\python.exe server\app.py
 ```
 
-Esto crea/actualiza `server/apps.sqlite` con los EXE/UWP detectados y agrega <!-- # FIX: nueva ruta de base -->
-un catálogo base (WhatsApp, Discord, Chrome, Administrador de tareas). El <!-- # FIX: mantener detalle de catálogo -->
-repositorio no incluye un archivo SQLite prellenado; se genera automáticamente <!-- # FIX: aclarar comportamiento -->
-la primera vez que corras el escáner o el cliente. <!-- # FIX: sin cambios funcionales -->
+El servidor queda escuchando en `http://127.0.0.1:5050`. Los endpoints protegidos (`/parse`, `/apps`, `/apps/scan`) devuelven `401` si la API key es incorrecta y `429` al superar el rate limit configurado.
 
-## Correr el servidor
+## Primer escaneo del cliente
 
-```bash
-python -m rai.server.app
+- Script recomendado: `scripts\run_client_scan.bat`
+  - Vuelve a cargar `.env`, deriva `RAI_SERVER_URL` → `/apps/scan` y ejecuta `client/scanner.py --full --send`.
+  - Muestra el JSON generado y reporta el resultado del POST.
+- Alternativa manual:
+
+```powershell
+$env:RAI_SERVER_API_KEY = "tu_clave"
+$env:RAI_SERVER_URL = "http://127.0.0.1:5050/parse"
+.\.venv\Scripts\python.exe client\scanner.py --full --send --url http://127.0.0.1:5050/apps/scan
 ```
 
-El servidor expone `POST /parse`, `GET /apps`, `POST /apps/scan` y `GET /health` en <!-- # FIX: documentar endpoints -->
-`http://127.0.0.1:5050/` y escribe logs en `logs/server.log`. <!-- # FIX: mantener detalle de logging -->
-
-## Correr el cliente
-
-```bash
-python -m rai.client.main
-```
-
-Flujo inicial:
-
-1. Escaneo de aplicaciones y actualización de la base de datos.
-2. Mensaje: `RAI listo. Decí 'hola rai' o presioná Enter para hablar.`
-3. Hotword detectada (o Enter) → prompt `hola, ¿qué querés?`
-
-Ejemplos de comandos:
-
-- `abrime whatsapp`
-- `cerrame chrome`
-- `minimizame discord`
-- `poné discord en foco`
-- `abrime el administrador de tareas`
-- `qué apps tengo`
+El cliente también puede levantar la UI interactiva con `.\.venv\Scripts\python.exe -m rai.client.main` (requiere que el servidor esté arriba).
 
 ## Troubleshooting
 
-| Problema | Solución |
-| --- | --- |
-| **No detecta el micrófono** | Instalá `pyaudio`, verificá drivers. El cliente seguirá disponible por teclado. |
-| **Acciones de minimizar/maximizar fallan** | Asegurate de tener `pywin32` instalado. Sin él, el cliente avisará que la función no está disponible. |
-| **UWP no abre** | Verificá que el AUMID exista (`Get-StartApps`). Podés ejecutar `python -m rai.server.init_db` para refrescar el catálogo. |
-| **Cerrar app no funciona** | Algunas apps requieren `/F`. El executor intenta primero cierre suave y luego forzado con aviso en logs. |
-| **El servidor no responde** | Revisá que `python -m rai.server.app` esté corriendo. El cliente mostrará “No pude comunicarme con el parser…”. |
+| Problema | Cómo se manifiesta | Solución |
+| --- | --- | --- |
+| **PowerShell restringido** | El script imprime `PowerShell no disponible` y el escáner omite apps UWP. | Ejecutá PowerShell como administrador una vez y corré `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. Luego reintentá el escaneo. |
+| **pywin32 / pefile faltantes** | Logs con advertencias sobre metadatos y accesos directos no resueltos. | Son opcionales. Instalalos dentro de la venv (`pip install pywin32 pefile`) si necesitás hashes e íconos; de lo contrario podés ignorar el mensaje. |
+| **Variables sin configurar** | `scripts\run_server.bat`/`run_client_scan.bat` muestran `[WARN] No se encontró .env` o el servidor responde `401`/`429`. | Completá `.env` con `RAI_SERVER_API_KEY` y revisá `RATE_LIMIT_*`. Los scripts deben leerse desde la carpeta raíz. |
+| **Permisos de red bloqueados** | `client/scanner.py` registra `URLError` al enviar a `/apps/scan`. | Verificá que el firewall permita conexiones locales al puerto 5050. Podés cambiar el host con `RAI_SERVER_HOST`/`RAI_SERVER_PORT` en `.env` y reiniciar el server. |
 
-## Logs
+## Tests
 
-- `logs/client.log`: eventos del loop, fallos de audio, resultados de ejecución.
-- `logs/server.log`: peticiones al parser, errores de interpretación.
+Para correr las pruebas unitarias (opcionales pero recomendadas):
 
-Ambos usan `RotatingFileHandler` (500 KB, 3 backups) para evitar crecimiento
-ilimitado.
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+```
 
-## Extensiones futuras
-
-- HUD/Overlay gráfico.
-- Entrenamiento de un modelo específico de hotword.
-- Gestión de alias personalizados almacenados en la base.
+Esto valida utilidades clave del escáner en entornos Windows y CI.
