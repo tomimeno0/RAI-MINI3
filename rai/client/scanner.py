@@ -512,6 +512,19 @@ def _build_payload(apps: List[Dict[str, object]]) -> Dict[str, object]:
 def _send_payload(url: str, payload: Dict[str, object]) -> str:
     import urllib.error
     import urllib.request
+    trace_id = uuid.uuid4().hex
+    data = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        TRACE_HEADER: trace_id,
+    }
+    api_key = os.environ.get("RAI_CLIENT_API_KEY")
+    if api_key:
+        headers["X-RAI-Key"] = api_key
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers=headers,
         method="POST",
     )
     with with_trace_id(LOGGER, trace_id) as log:

@@ -4,16 +4,20 @@ The original executor exposed a parser-focused command dispatcher.  The new API
 offers dedicated helpers for controlling desktop and UWP applications.  Each
 helper returns a structured dictionary that callers can forward to the HUD.
 """
+
 from __future__ import annotations
 
-
+import ctypes
+import logging
 import subprocess
 import sys
 import time
 import uuid
+from ctypes import wintypes
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+try:  # pragma: no cover - optional dependency on Windows environments.
     import win32con  # type: ignore
     import win32gui  # type: ignore
     import win32process  # type: ignore
@@ -28,6 +32,8 @@ if sys.platform.startswith("win"):
         _USER32 = _KERNEL32 = None
 else:  # pragma: no cover - we do not exercise win32 paths on non Windows.
     _USER32 = _KERNEL32 = None
+
+ResultDict = Dict[str, object]
 
 _LOGGER = logging.getLogger(__name__)
 
