@@ -1,50 +1,76 @@
-"""Shared SQLite helpers for the server components."""  # FIX: provide reusable database utilities
-from __future__ import annotations  # FIX: ensure future annotations support
+"""Shared SQLite helpers for the server components."""
+from __future__ import annotations
 
-import sqlite3  # FIX: interact with SQLite database
-from pathlib import Path  # FIX: handle filesystem paths
-from typing import Dict, List  # FIX: provide precise typing aliases
+import sqlite3
+from pathlib import Path
+from typing import Dict, List
 
-DB_PATH = Path(__file__).resolve().parents[1] / "server" / "apps.sqlite"  # FIX: canonical database path
+from server.init_db import DEFAULT_DB_PATH as DEFAULT_SERVER_DB_PATH, apply_migrations, get_logger
+
+DB_PATH = Path(DEFAULT_SERVER_DB_PATH)
+_LOGGER = get_logger()
 
 
-def ensure_schema(path: Path = DB_PATH) -> None:  # FIX: create schema if missing
-    path.parent.mkdir(parents=True, exist_ok=True)  # FIX: ensure directory exists
-    with sqlite3.connect(path) as conn:  # FIX: open database connection
-        conn.execute(  # FIX: create apps table with expected columns
+def ensure_schema(path: Path = DB_PATH) -> None:
+    """Ensure the SQLite schema is present by applying migrations."""
+
+    target = Path(path) if path else DB_PATH
+    apply_migrations(db_path=target, logger=_LOGGER)
+
+
+def load_apps(path: Path = DB_PATH) -> List[Dict[str, object]]:
+    """Return the list of active installs for the parser catalogue."""
+
+    ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS apps (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                display_name TEXT NOT NULL,
-                type TEXT NOT NULL,
-                exe_path TEXT,
-                process_name TEXT,
-                app_id TEXT,
-                source TEXT DEFAULT 'scan',
-                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(name, type)
+            SELECT
+                lower(a.display_name) AS normalized_name,
+                a.display_name,
+                CASE WHEN i.package_id IS NOT NULL THEN 'UWP' ELSE 'EXE' END AS app_type,
+                b.exe_path,
+                NULL AS process_name,
+                p.package_fullname AS app_id,
+                i.source,
+                i.last_seen_at,
+                h.hostname
+            FROM installs i
+            JOIN hosts h ON h.id = i.host_id
+            JOIN apps_catalog a ON a.id = i.app_catalog_id
+            LEFT JOIN packages p ON p.id = i.package_id
+            LEFT JOIN binaries b ON b.id = i.binary_id
+            WHERE i.is_active = 1 AND i.removed_at IS NULL
+            ORDER BY i.last_seen_at DESC
+            """
+        )
+        apps: List[Dict[str, object]] = []
+        for row in cursor.fetchall():
+            apps.append(
+                {
+                    "name": row["normalized_name"],
+                    "display_name": row["display_name"],
+                    "type": row["app_type"],
+                    "exe_path": row["exe_path"],
+                    "process_name": row["process_name"],
+                    "app_id": row["app_id"],
+                    "source": row["source"],
+                    "last_seen": row["last_seen_at"],
+                    "hostname": row["hostname"],
+                }
             )
-            """
-        )
-        conn.execute(  # FIX: add unique index for faster lookups
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_apps_name_type ON apps(name, type)"
-        )
-        conn.commit()  # FIX: persist schema changes
+        return apps
 
 
-def load_apps(path: Path = DB_PATH) -> List[Dict[str, object]]:  # FIX: fetch catalogue entries
-    ensure_schema(path)  # FIX: guard against missing schema
-    with sqlite3.connect(path) as conn:  # FIX: open database connection for reads
-        conn.row_factory = sqlite3.Row  # FIX: map rows to dict-like objects
-        cursor = conn.execute(  # FIX: retrieve all apps ordered by last seen
-            "SELECT name, display_name, type, exe_path, process_name, app_id, source, last_seen FROM apps ORDER BY last_seen DESC"
-        )
-        return [dict(row) for row in cursor.fetchall()]  # FIX: convert rows to dictionaries
+def scan_and_update_db(path: Path = DB_PATH) -> None:
+    """Run the client scanner and persist results into the shared database."""
 
+    ensure_schema(path)
+    from ..client import scanner  # Lazy import to avoid Windows-only deps at import time
 
-def scan_and_update_db(path: Path = DB_PATH) -> None:  # FIX: delegate scanning to client scanner when available
-    from ..client import scanner  # FIX: local import to avoid hard dependency at module load
+    if hasattr(scanner, "scan_and_update_db"):
+        scanner.scan_and_update_db(path)
+    else:  # pragma: no cover - compatibility shim until scanner grows DB integration
+        _LOGGER.warning("Scanner module does not expose scan_and_update_db")
 
-    scanner.ensure_schema(path)  # FIX: reuse client schema logic for compatibility
-    scanner.scan_and_update_db(path)  # FIX: trigger scanner update against shared DB
