@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
-from ..client.scanner import DB_PATH, ensure_schema, load_apps
+from .db_utils import DB_PATH, ensure_schema, load_apps  # FIX: source DB helpers from shared server utilities
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -438,13 +438,13 @@ def _load_system_prompt() -> str:
     try:
         return SYSTEM_PROMPT_FILE.read_text(encoding="utf-8")
     except FileNotFoundError:
-        _LOGGER.error("No se encontró system.txt para Cohere")
+        _LOGGER.error("No se encontró system.txt para Cohere en %s", SYSTEM_PROMPT_FILE)  # FIX: log missing system prompt path
         return ""
 
 
 def _load_fewshots() -> List[Dict[str, str]]:
     if not FEWSHOT_FILE.exists():
-        _LOGGER.error("No se encontró fewshot.jsonl para Cohere")
+        _LOGGER.error("No se encontró fewshot.jsonl para Cohere en %s", FEWSHOT_FILE)  # FIX: log missing few-shot path
         return []
     examples: List[Dict[str, str]] = []
     for line in FEWSHOT_FILE.read_text(encoding="utf-8").splitlines():

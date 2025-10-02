@@ -14,11 +14,12 @@ rai/
 │  ├─ audio.py        # Manejo de hotword y captura de comandos (voz/teclado)
 │  ├─ executor.py     # Ejecuta acciones en Windows (cmd + pywin32 opcional)
 │  └─ scanner.py      # Escanea EXE y UWP, persiste en SQLite
-├─ server/
-│  ├─ app.py          # API Flask POST /parse
-│  ├─ moduler.py      # Parser en español, usa la base de datos
-│  └─ init_db.py      # Inicializador y escaneo manual
-├─ server_db/         # Carpeta para la base SQLite generada en runtime
+├─ server/ <!-- # FIX: document shared server layout -->
+│  ├─ app.py          # API Flask /parse, /apps, /apps/scan y /health <!-- # FIX: detallar endpoints expuestos -->
+│  ├─ db_utils.py     # Utilidades compartidas para la base SQLite <!-- # FIX: incluir nuevo helper -->
+│  ├─ moduler.py      # Parser en español, usa la base de datos <!-- # FIX: mantener descripción -->
+│  ├─ init_db.py      # Inicializador y escaneo manual <!-- # FIX: mantener instrucción -->
+│  └─ apps.sqlite     # Base SQLite generada en runtime (se crea automáticamente) <!-- # FIX: reflejar nueva ubicación -->
 ├─ logs/
 │  ├─ client.log
 │  └─ server.log
@@ -73,10 +74,10 @@ El cliente ejecuta el scanner automáticamente al arrancar, pero podés forzarlo
 python -m rai.server.init_db
 ```
 
-Esto crea/actualiza `server_db/apps.sqlite` con los EXE/UWP detectados y agrega
-un catálogo base (WhatsApp, Discord, Chrome, Administrador de tareas). El
-repositorio no incluye un archivo SQLite prellenado; se genera automáticamente
-la primera vez que corras el escáner o el cliente.
+Esto crea/actualiza `server/apps.sqlite` con los EXE/UWP detectados y agrega <!-- # FIX: nueva ruta de base -->
+un catálogo base (WhatsApp, Discord, Chrome, Administrador de tareas). El <!-- # FIX: mantener detalle de catálogo -->
+repositorio no incluye un archivo SQLite prellenado; se genera automáticamente <!-- # FIX: aclarar comportamiento -->
+la primera vez que corras el escáner o el cliente. <!-- # FIX: sin cambios funcionales -->
 
 ## Correr el servidor
 
@@ -84,8 +85,8 @@ la primera vez que corras el escáner o el cliente.
 python -m rai.server.app
 ```
 
-El servidor expone `POST /parse` en `http://127.0.0.1:5050/parse` y escribe
-logs en `logs/server.log`.
+El servidor expone `POST /parse`, `GET /apps`, `POST /apps/scan` y `GET /health` en <!-- # FIX: documentar endpoints -->
+`http://127.0.0.1:5050/` y escribe logs en `logs/server.log`. <!-- # FIX: mantener detalle de logging -->
 
 ## Correr el cliente
 

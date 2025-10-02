@@ -14,7 +14,7 @@ from typing import Dict, Iterable, List, Optional
 
 _LOGGER = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).resolve().parents[1] / "server_db" / "apps.sqlite"
+DB_PATH = Path(__file__).resolve().parents[1] / "server" / "apps.sqlite"  # FIX: point scanner to shared server database
 
 
 @dataclass

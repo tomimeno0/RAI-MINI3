@@ -1,4 +1,4 @@
-"""Flask app exposing the /parse endpoint."""
+"""Flask app exposing command parsing and catalogue endpoints."""  # FIX: document expanded API surface
 from __future__ import annotations
 
 import logging
@@ -9,7 +9,9 @@ from typing import Dict, Tuple
 
 from flask import Flask, request
 
+from ..client.scanner import scan_and_update_db  # FIX: reuse scanner to refresh catalogue
 from . import moduler
+from .db_utils import DB_PATH, ensure_schema, load_apps  # FIX: share DB helpers with server modules
 
 LOG_PATH = Path(__file__).resolve().parents[2] / "logs" / "server.log"
 _LOGGER = logging.getLogger(__name__)
@@ -18,15 +20,16 @@ _LOGGER = logging.getLogger(__name__)
 def create_app() -> Flask:
     app = Flask(__name__)
     _configure_logging()
+    ensure_schema(DB_PATH)  # FIX: prepare database before handling requests
 
-    @app.after_request
+    @app.after_request  # FIX: inject CORS headers on every response
     def add_cors_headers(response):  # type: ignore[override]
         response.headers.setdefault("Access-Control-Allow-Origin", "*")
         response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type")
-        response.headers.setdefault("Access-Control-Allow-Methods", "POST, OPTIONS")
+        response.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, OPTIONS")  # FIX: allow catalogue routes
         return response
 
-    @app.route("/parse", methods=["POST"])
+    @app.route("/parse", methods=["POST"])  # FIX: parsing endpoint configuration
     def parse_endpoint() -> Tuple[Dict[str, object], int]:
         if not request.is_json:
             return _json_error("Esperaba JSON", "content-type"), 400
@@ -56,6 +59,27 @@ def create_app() -> Flask:
             result.get("app_name"),
         )
         return result, 200
+
+    @app.route("/apps", methods=["GET"])  # FIX: expose catalogue listing endpoint
+    def list_apps() -> Tuple[Dict[str, object], int]:  # FIX: serve GET /apps responses
+        catalogue = load_apps(DB_PATH)  # FIX: serve latest catalogue snapshot
+        return {"apps": catalogue}, 200  # FIX: respond with catalogue payload
+
+    @app.route("/apps/scan", methods=["POST"])  # FIX: expose manual rescan endpoint
+    def scan_apps() -> Tuple[Dict[str, object], int]:  # FIX: trigger catalogue refresh
+        start = time.time()  # FIX: measure scan latency
+        try:
+            scan_and_update_db(DB_PATH)  # FIX: trigger rescan using shared database
+        except Exception as exc:  # pragma: no cover - defensive
+            _LOGGER.exception("Error escaneando apps: %s", exc)  # FIX: log scan failure
+            return _json_error("No pude actualizar el catálogo", str(exc)), 500  # FIX: propagate scan error to caller
+        latency = (time.time() - start) * 1000  # FIX: compute scan duration in ms
+        _LOGGER.info("Escaneo completado en %.0f ms", latency)  # FIX: record scan completion
+        return {"apps": load_apps(DB_PATH)}, 200  # FIX: return refreshed catalogue after scan
+
+    @app.route("/health", methods=["GET"])  # FIX: expose health-check endpoint
+    def health() -> Tuple[Dict[str, object], int]:  # FIX: serve health responses
+        return {"status": "ok"}, 200  # FIX: health-check endpoint for clients
 
     return app
 
