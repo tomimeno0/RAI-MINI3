@@ -5,7 +5,7 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 try:  # pywin32 is optional.
     import win32con  # type: ignore
@@ -14,14 +14,24 @@ try:  # pywin32 is optional.
 except Exception:  # pragma: no cover - executed when pywin32 is absent.
     win32con = win32gui = win32process = None  # type: ignore
 
+# Type alias for payloads received from the parser.
+ExecutionPayload = Dict[str, Optional[str]]
+
+# Type alias for the metadata returned to the caller.
+ExecutionResult = Dict[str, str]
+
+ActionHandler = Callable[[ExecutionPayload], ExecutionResult]
+
 _LOGGER = logging.getLogger(__name__)
 
 
 def _is_windows() -> bool:
+    """Return whether the current interpreter runs on Windows."""
+
     return sys.platform.startswith("win32")
 
 
-def execute(action_payload: Dict[str, Optional[str]]) -> Dict[str, str]:
+def execute(action_payload: ExecutionPayload) -> ExecutionResult:
     """Execute an action returned by the parser.
 
     Parameters
@@ -46,29 +56,40 @@ def execute(action_payload: Dict[str, Optional[str]]) -> Dict[str, str]:
         _LOGGER.warning("Acciones de ventana solo disponibles en Windows")
         return {"status": "skipped", "reason": "non_windows"}
 
-    if action == "abrir_app":
-        return _open_app(action_payload)
-    if action == "cerrar":
-        return _close_app(action_payload)
+    # Dispatch table keeps branching predictable as we add simple actions.
+    handlers: Dict[str, ActionHandler] = {
+        "abrir_app": _open_app,
+        "cerrar": _close_app,
+    }
+
+    handler = handlers.get(action)
+    if handler:
+        return handler(action_payload)
+
     if action in {"minimizar", "maximizar", "enfocar"}:
         return _control_window(action, action_payload)
 
     return {"status": "ignored", "reason": f"unsupported_action:{action}"}
 
 
-def _open_app(payload: Dict[str, Optional[str]]) -> Dict[str, str]:
+def _open_app(payload: ExecutionPayload) -> ExecutionResult:
+    """Launch desktop or UWP applications based on payload information."""
+
     app_type = payload.get("app_type")
     exe_path = payload.get("exe_path")
     app_id = payload.get("app_id")
 
     try:
         if app_type == "EXE" and exe_path:
-            if exe_path.lower().endswith(".lnk"):
-                cmd = ["cmd", "/c", "start", "", exe_path]
+            executable = Path(exe_path).expanduser()
+            if executable.suffix.lower() == ".lnk":
+                # Use ``start`` so Windows resolves the shortcut target.
+                cmd = ["cmd", "/c", "start", "", str(executable)]
                 subprocess.Popen(cmd, shell=False)
             else:
-                subprocess.Popen([exe_path], shell=False)
+                subprocess.Popen([str(executable)], shell=False)
             return {"status": "ok", "action": "abrir_app"}
+
         if app_type == "UWP" and app_id:
             cmd = ["cmd", "/c", "start", f"shell:AppsFolder\\{app_id}"]
             subprocess.Popen(cmd, shell=False)
@@ -80,7 +101,9 @@ def _open_app(payload: Dict[str, Optional[str]]) -> Dict[str, str]:
     return {"status": "error", "error": "datos_incompletos"}
 
 
-def _close_app(payload: Dict[str, Optional[str]]) -> Dict[str, str]:
+def _close_app(payload: ExecutionPayload) -> ExecutionResult:
+    """Terminate a process using ``taskkill`` (soft then forced)."""
+
     process_name = payload.get("process_name")
     if not process_name:
         return {"status": "error", "error": "process_name_missing"}
@@ -101,7 +124,9 @@ def _close_app(payload: Dict[str, Optional[str]]) -> Dict[str, str]:
         return {"status": "error", "error": "taskkill_not_found"}
 
 
-def _control_window(action: str, payload: Dict[str, Optional[str]]) -> Dict[str, str]:
+def _control_window(action: str, payload: ExecutionPayload) -> ExecutionResult:
+    """Handle window minimisation/maximisation/focus actions."""
+
     if win32gui is None or win32con is None:
         _LOGGER.warning("pywin32 requerido para %s", action)
         return {"status": "skipped", "reason": "pywin32_missing"}
@@ -128,16 +153,19 @@ def _control_window(action: str, payload: Dict[str, Optional[str]]) -> Dict[str,
 
 
 def _find_window_by_process(process_name: str) -> Optional[int]:
-    if win32gui is None:
+    """Return the first window handle associated with *process_name*."""
+
+    if win32gui is None or win32process is None:
         return None
 
-    hwnds = []
+    hwnds: list[int] = []
+    target_process = process_name.lower()  # Cache lower case to avoid repeats.
 
     def callback(hwnd: int, _: int) -> None:
         try:
             _, pid = win32process.GetWindowThreadProcessId(hwnd)
             executable = Path(_process_exe_from_pid(pid)).name
-            if executable.lower() == process_name.lower():
+            if executable.lower() == target_process:
                 hwnds.append(hwnd)
         except Exception:  # pragma: no cover - defensive
             return
@@ -147,7 +175,7 @@ def _find_window_by_process(process_name: str) -> Optional[int]:
 
 
 def _process_exe_from_pid(pid: int) -> str:
-    """Return the executable path for a process id using wmic."""
+    """Return the executable path for a process id using WMIC."""
 
     query = (
         "wmic", "process", "where", f"ProcessId={pid}", "get", "ExecutablePath", "/value"
