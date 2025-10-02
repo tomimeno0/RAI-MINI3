@@ -14,17 +14,14 @@ Notas para desarrolladores:
 from __future__ import annotations
 
 import json
-import logging
-import re
-import sqlite3
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-_LOGGER = logging.getLogger(__name__)
+
+_LOGGER = get_logger(__name__)
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 SYSTEM_PROMPT_FILE = PROMPTS_DIR / "system.txt"
@@ -431,18 +428,7 @@ def _rule_based_infer(text: str, normalized: str) -> IntentGuess:
     )
 
 
-def _detect_action(words: List[str]) -> Optional[str]:
-    for word in words:
-        if word in VALID_ACTIONS:
-            return word
-        if word in ACTION_SYNONYMS:
-            return ACTION_SYNONYMS[word]
-    if "pone" in words or "poné" in words:
-        if "foco" in words:
-            return "foco"
-    if "poner" in words and "foco" in words:
-        return "foco"
-    return None
+
 
 
 def _resolve_candidate(
