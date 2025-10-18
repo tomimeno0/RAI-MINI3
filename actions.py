@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict
 
 try:
     import pygetwindow as gw  # type: ignore
@@ -16,6 +16,13 @@ except Exception:  # pragma: no cover - dependencia opcional
 
 
 CATALOG_PATH = Path(__file__).with_name("apps.json")
+
+
+class ActionResponse(TypedDict):
+    """Respuesta estandarizada para operaciones sobre aplicaciones."""
+
+    ok: bool
+    msg: str
 
 
 def _unique_strings(values: Iterable[object]) -> List[str]:
@@ -347,3 +354,78 @@ def _control_window(target: Optional[str], action: str) -> Tuple[bool, str]:
                 return False, f"No pude controlar la ventana: {exc}"
     return False, "No encontré la ventana"
 
+
+def _resolve_path_from_app(app: Dict[str, Any]) -> str:
+    launch = app.get("launch")
+    if isinstance(launch, str) and launch.strip():
+        return os.path.expandvars(launch.strip())
+    for candidate in app.get("paths", []):  # type: ignore[index]
+        if isinstance(candidate, str) and candidate.strip():
+            return os.path.expandvars(candidate.strip())
+    return ""
+
+
+def _select_process_hint(app: Dict[str, Any]) -> str:
+    exe_name = app.get("exe_name")
+    if isinstance(exe_name, str) and exe_name.strip():
+        return exe_name.strip()
+    for hint in app.get("window_hints") or []:
+        if isinstance(hint, str) and hint.strip():
+            return hint.strip()
+    path_value = _resolve_path_from_app(app)
+    if path_value:
+        return Path(path_value).stem
+    identifier = app.get("id")
+    if isinstance(identifier, str):
+        return identifier
+    return ""
+
+
+def open_app(app_key: str) -> ActionResponse:
+    """Abre una aplicacion conocida y estandariza la respuesta."""
+    try:
+        ok, msg = _open_app(app_key)
+    except Exception as exc:  # noqa: BLE001
+        ok = False
+        msg = f"Error inesperado al abrir {app_key}: {exc}"
+    return {"ok": ok, "msg": msg}
+
+
+def minimize_app(app_key: str) -> ActionResponse:
+    """Minimiza una aplicacion identificada por su clave o alias."""
+    try:
+        ok, msg = _control_window(app_key, "minimize")
+    except Exception as exc:  # noqa: BLE001
+        ok = False
+        msg = f"Error inesperado al minimizar {app_key}: {exc}"
+    return {"ok": ok, "msg": msg}
+
+
+def close_app(app_key: str) -> ActionResponse:
+    """Cierra una aplicacion activa y devuelve el estado de la operacion."""
+    try:
+        ok, msg = _close_app(app_key)
+    except Exception as exc:  # noqa: BLE001
+        ok = False
+        msg = f"Error inesperado al cerrar {app_key}: {exc}"
+    return {"ok": ok, "msg": msg}
+
+
+def list_known_apps() -> Dict[str, Dict[str, Any]]:
+    """Devuelve el indice de aplicaciones conocidas listo para consulta."""
+    index: Dict[str, Dict[str, Any]] = {}
+    for app in ACTIONS_CATALOG:
+        key = str(app.get("id", "")).strip()
+        if not key:
+            continue
+        raw_aliases = app.get("aliases") or []
+        if isinstance(raw_aliases, str):
+            raw_aliases = [raw_aliases]
+        friendly = _unique_strings(raw_aliases)
+        index[key] = {
+            "key": key,
+            "friendly": friendly,
+            "process": _select_process_hint(app),
+            "path": _resolve_path_from_app(app),
+        }
+    return index
