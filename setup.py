@@ -16,7 +16,6 @@ from typing import Dict, Iterable, List, Optional
 
 BASE_DIR = Path(__file__).parent
 APPS_JSON_PATH = BASE_DIR / "apps.json"
-ARCHIVOS_JSON_PATH = BASE_DIR / "archivos.json"
 LOG_PATH = BASE_DIR / "setup.log"
 
 RUTAS_EXE = [
@@ -27,66 +26,23 @@ RUTAS_EXE = [
     os.path.expandvars(r"%LocalAppData%"),
 ]
 
-COMANDOS_GENERALES = [
-    {"nombre": "Administrador de tareas", "abrir": "taskmgr", "cerrar": "taskkill /IM taskmgr.exe /F"},
-    {"nombre": "Símbolo del sistema", "abrir": "cmd", "cerrar": "taskkill /IM cmd.exe /F"},
-    {"nombre": "Calculadora", "abrir": "calc", "cerrar": "taskkill /IM Calculator.exe /F"},
-    {"nombre": "Bloc de notas", "abrir": "notepad", "cerrar": "taskkill /IM notepad.exe /F"},
-    {"nombre": "Explorador de archivos", "abrir": "explorer", "cerrar": "taskkill /IM explorer.exe /F"},
-    {"nombre": "Centro de movilidad", "abrir": "mblctr", "cerrar": None},
-    {"nombre": "Configuración", "abrir": "start ms-settings:", "cerrar": None},
-    {"nombre": "Panel de control", "abrir": "control", "cerrar": None},
-    {"nombre": "Desinstalar programas", "abrir": "appwiz.cpl", "cerrar": None},
-    {"nombre": "Ejecutar", "abrir": r"explorer shell:AppsFolder\Microsoft.Windows.Run_8wekyb3d8bbwe!App", "cerrar": None},
-    {"nombre": "Windows Update", "abrir": "control update", "cerrar": None},
-    {"nombre": "Servicios", "abrir": "services.msc", "cerrar": None},
-    {"nombre": "Visor de eventos", "abrir": "eventvwr", "cerrar": None},
-    {"nombre": "Monitor de recursos", "abrir": "resmon", "cerrar": None},
-    {"nombre": "Administrador de dispositivos", "abrir": "devmgmt.msc", "cerrar": None},
-    {"nombre": "Windows Defender", "abrir": "start windowsdefender:", "cerrar": None},
-    {"nombre": "Centro de seguridad de Windows Defender", "abrir": "windowsdefender:", "cerrar": None},
-    {"nombre": "Windows PowerShell", "abrir": "powershell", "cerrar": "taskkill /IM powershell.exe /F"},
-    {"nombre": "Bloc de notas++", "abrir": "notepad++", "cerrar": "taskkill /IM notepad++.exe /F"},
-    {"nombre": "Reproductor de Windows Media", "abrir": "wmplayer", "cerrar": "taskkill /IM wmplayer.exe /F"},
-    {"nombre": "Microsoft Edge", "abrir": "start msedge", "cerrar": None},
-    {"nombre": "Google Chrome", "abrir": "start chrome", "cerrar": None},
-    {"nombre": "Mozilla Firefox", "abrir": "start firefox", "cerrar": None},
-    {"nombre": "Microsoft Word", "abrir": "start winword", "cerrar": None},
-    {"nombre": "Microsoft Excel", "abrir": "start excel", "cerrar": None},
-    {"nombre": "Microsoft PowerPoint", "abrir": "start powerpnt", "cerrar": None},
-    {"nombre": "Spotify", "abrir": "start spotify", "cerrar": "taskkill /IM spotify.exe /F"},
-    {"nombre": "Skype", "abrir": "start skype", "cerrar": "taskkill /IM skype.exe /F"},
-    {"nombre": "Discord", "abrir": "start discord", "cerrar": "taskkill /IM discord.exe /F"},
-    {"nombre": "Zoom", "abrir": "start zoom", "cerrar": "taskkill /IM zoom.exe /F"},
-    {"nombre": "Teams", "abrir": "start teams", "cerrar": "taskkill /IM Teams.exe /F"},
-]
+IGNORED_EXE_PATTERNS = (
+    "setup",
+    "instal",
+    "unins",
+    "updater",
+    "update",
+    "patch",
+    "driver",
+    "vc_redist",
+    "helper",
+    "support",
+    "repair",
+    "maint",
+    "service pack",
+)
 
-ACCIONES_EXTRA = [
-    {"nombre": "Discord", "accion": "abrir", "comando": "start discord"},
-    {"nombre": "Discord", "accion": "cerrar", "comando": "taskkill /IM discord.exe /F"},
-    {"nombre": "Discord", "accion": "reiniciar", "comando": "taskkill /IM discord.exe /F && start discord"},
-    {"nombre": "Spotify", "accion": "abrir", "comando": "start spotify"},
-    {"nombre": "Spotify", "accion": "cerrar", "comando": "taskkill /IM spotify.exe /F"},
-    {"nombre": "Spotify", "accion": "reiniciar", "comando": "taskkill /IM spotify.exe /F && start spotify"},
-    {"nombre": "Zoom", "accion": "abrir", "comando": "start zoom"},
-    {"nombre": "Zoom", "accion": "cerrar", "comando": "taskkill /IM zoom.exe /F"},
-    {"nombre": "Zoom", "accion": "desinstalar", "comando": 'powershell "Get-AppxPackage *zoom* | Remove-AppxPackage"'},
-    {"nombre": "Calculadora", "accion": "cerrar", "comando": "taskkill /IM Calculator.exe /F"},
-    {"nombre": "Calculadora", "accion": "reiniciar", "comando": "taskkill /IM Calculator.exe /F && start calc"},
-    {"nombre": "WhatsApp", "accion": "abrir", "comando": "start whatsapp"},
-    {"nombre": "WhatsApp", "accion": "cerrar", "comando": "taskkill /IM whatsapp.exe /F"},
-    {"nombre": "WhatsApp", "accion": "reiniciar", "comando": "taskkill /IM whatsapp.exe /F && start whatsapp"},
-    {"nombre": "Google Chrome", "accion": "cerrar", "comando": "taskkill /IM chrome.exe /F"},
-    {"nombre": "Google Chrome", "accion": "reiniciar", "comando": "taskkill /IM chrome.exe /F && start chrome"},
-    {"nombre": "Bloc de notas", "accion": "cerrar", "comando": "taskkill /IM notepad.exe /F"},
-    {"nombre": "Bloc de notas", "accion": "reiniciar", "comando": "taskkill /IM notepad.exe /F && start notepad"},
-    {"nombre": "Visual Studio Code", "accion": "cerrar", "comando": "taskkill /IM Code.exe /F"},
-    {"nombre": "Visual Studio Code", "accion": "reiniciar", "comando": "taskkill /IM Code.exe /F && start code"},
-    {"nombre": "Teams", "accion": "cerrar", "comando": "taskkill /IM Teams.exe /F"},
-    {"nombre": "Teams", "accion": "reiniciar", "comando": "taskkill /IM Teams.exe /F && start teams"},
-    {"nombre": "Skype", "accion": "cerrar", "comando": "taskkill /IM skype.exe /F"},
-    {"nombre": "Skype", "accion": "reiniciar", "comando": "taskkill /IM skype.exe /F && start skype"},
-]
+IGNORED_PATH_SEGMENTS = {"temp", "installer", "$patchcache$"}
 
 CARPETAS_POR_DEFECTO = [
     os.path.expandvars(r"%UserProfile%\Desktop"),
@@ -133,6 +89,18 @@ def reservar_id(nombre: str, tipo: str, existentes: Dict[str, Dict[str, object]]
     return candidato
 
 
+def es_ejecutable_valido(ruta_completa: str) -> bool:
+    ruta = Path(ruta_completa)
+    nombre = ruta.name.lower()
+    if not nombre.endswith(".exe"):
+        return False
+    if any(pat in nombre for pat in IGNORED_EXE_PATTERNS):
+        return False
+    if any(seg.lower() in IGNORED_PATH_SEGMENTS for seg in ruta.parts):
+        return False
+    return True
+
+
 def escanear_apps_exe() -> List[Dict[str, str]]:
     resultados: List[Dict[str, str]] = []
     for ruta_base in RUTAS_EXE:
@@ -140,14 +108,50 @@ def escanear_apps_exe() -> List[Dict[str, str]]:
             continue
         for root, _, files in os.walk(ruta_base):
             for file in files:
-                if not file.lower().endswith(".exe"):
-                    continue
                 ruta_completa = os.path.join(root, file)
+                if not es_ejecutable_valido(ruta_completa):
+                    continue
                 nombre_app = os.path.splitext(file)[0]
                 resultados.append(
                     {"nombre": nombre_app, "ruta": ruta_completa, "proceso": file}
                 )
     return resultados
+
+
+def escanear_paquetes_store() -> Dict[str, Dict[str, Optional[str]]]:
+    comando_powershell = r"""
+    $ErrorActionPreference = "SilentlyContinue"
+    Get-AppxPackage | Select-Object Name, PackageFamilyName, InstallLocation, SignatureKind | ConvertTo-Json -Depth 3 -Compress
+    """
+    try:
+        salida = subprocess.check_output(
+            ["powershell", "-Command", comando_powershell],
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        escribir_log(f"Fallo consultando paquetes Store: {exc}")
+        return {}
+
+    try:
+        datos = json.loads(salida.decode("utf-8", errors="ignore") or "[]")
+    except json.JSONDecodeError as exc:
+        escribir_log(f"Respuesta de paquetes Store inv�lida: {exc}")
+        return {}
+
+    if isinstance(datos, dict):
+        datos = [datos]
+
+    paquetes: Dict[str, Dict[str, Optional[str]]] = {}
+    for pkg in datos or []:
+        familia = str(pkg.get("PackageFamilyName") or "").strip()
+        if not familia:
+            continue
+        paquetes[familia] = {
+            "nombre": str(pkg.get("Name") or "").strip() or familia,
+            "instalacion": str(pkg.get("InstallLocation") or "").strip() or None,
+            "origen": str(pkg.get("SignatureKind") or "").strip() or None,
+        }
+    return paquetes
 
 
 def escanear_apps_uwp() -> List[Dict[str, str]]:
@@ -188,14 +192,24 @@ def escanear_apps_uwp() -> List[Dict[str, str]]:
     if isinstance(datos, dict):
         datos = [datos]
 
+    paquetes_store = escanear_paquetes_store()
+
     resultado: List[Dict[str, str]] = []
     for app in datos or []:
         nombre = str(app.get("Name") or "").strip()
         appid = str(app.get("AppUserModelID") or "").strip()
         if not nombre or not appid:
             continue
+        familia = appid.split("!")[0] if "!" in appid else ""
+        info_store = paquetes_store.get(familia, {})
         resultado.append(
-            {"nombre": nombre, "comando": f'explorer.exe shell:appsFolder\\{appid}'}
+            {
+                "nombre": nombre,
+                "comando": f'explorer.exe shell:appsFolder\\{appid}',
+                "familia": familia,
+                "instalacion": info_store.get("instalacion"),
+                "origen": info_store.get("origen"),
+            }
         )
     return resultado
 
@@ -272,47 +286,24 @@ def generar_catalogo() -> Dict[str, object]:
         acciones["terminar_proceso"] = f"taskkill /IM {proceso} /T /F"
 
     for uwp in apps_uwp:
-        registrar_app(
+        paths_uwp: List[str] = []
+        if isinstance(uwp.get("instalacion"), str) and uwp["instalacion"]:
+            paths_uwp.append(uwp["instalacion"])  # type: ignore[arg-type]
+        aliases_extra: List[str] = [uwp["nombre"]]
+        if isinstance(uwp.get("familia"), str) and uwp["familia"]:
+            aliases_extra.append(uwp["familia"])  # type: ignore[arg-type]
+        app_uwp = registrar_app(
             catalogo,
             uwp["nombre"],
             "uwp",
             uwp["comando"],
             launch=uwp["comando"],
-            aliases=[uwp["nombre"]],
+            aliases=aliases_extra,
             window_hints=[uwp["nombre"]],
+            paths=paths_uwp,
         )
-
-    for comando in COMANDOS_GENERALES:
-        app = registrar_app(
-            catalogo,
-            comando["nombre"],
-            "cmd",
-            comando["abrir"],
-            launch=comando["abrir"],
-            aliases=[comando["nombre"]],
-            window_hints=[comando["nombre"]],
-        )
-        if comando.get("cerrar"):
-            app["acciones"]["cerrar"] = comando["cerrar"]  # type: ignore[index]
-
-    for extra in ACCIONES_EXTRA:
-        app = buscar_por_nombre(catalogo, extra["nombre"])
-        if not app and extra["accion"] == "abrir":
-            app = registrar_app(
-                catalogo,
-                extra["nombre"],
-                "cmd",
-                extra["comando"],
-                launch=extra["comando"],
-                aliases=[extra["nombre"]],
-                window_hints=[extra["nombre"]],
-            )
-        if not app:
-            escribir_log(f"Acción extra sin app asociada: {extra['nombre']}")
-            continue
-        acciones = app.setdefault("acciones", {})  # type: ignore[assignment]
-        if isinstance(acciones, dict):
-            acciones[extra["accion"]] = extra["comando"]
+        if isinstance(uwp.get("origen"), str) and uwp["origen"]:
+            app_uwp["store_signature"] = uwp["origen"]  # type: ignore[index]
 
     aplicaciones = sorted(catalogo.values(), key=lambda app: str(app.get("nombre", "")).lower())
     return {"aplicaciones": aplicaciones}
@@ -368,6 +359,22 @@ def escanear_archivos(calcular_hash: bool = False) -> List[Dict[str, object]]:
         print(f"Escaneando archivos en {ruta}...")
         for registro in listar_archivos(ruta, calcular_hash=calcular_hash):
             inventario[registro["ruta"]] = registro
+
+    paquetes_store = escanear_paquetes_store()
+    for familia, datos in paquetes_store.items():
+        ruta_instalacion = datos.get("instalacion") or ""
+        clave = ruta_instalacion or f"store://{familia}"
+        info: Dict[str, object] = {
+            "nombre": datos.get("nombre") or familia,
+            "ruta": clave,
+            "extension": "",
+            "tamano": 0,
+            "ultima_modificacion": datetime.now().isoformat(),
+            "tipo_mime": "appx-store",
+            "familia": familia,
+            "origen": datos.get("origen"),
+        }
+        inventario[clave] = info
     return list(inventario.values())
 
 
@@ -381,11 +388,6 @@ def main() -> None:
     catalogo = generar_catalogo()
     guardar_json(APPS_JSON_PATH, catalogo)
     print(f"Catálogo guardado en {APPS_JSON_PATH}")
-
-    print("Compilando inventario de archivos...")
-    archivos = escanear_archivos(calcular_hash=False)
-    guardar_json(ARCHIVOS_JSON_PATH, archivos)
-    print(f"Inventario guardado en {ARCHIVOS_JSON_PATH} ({len(archivos)} archivos)")
 
     escribir_log("Setup completado con JSON.")
 

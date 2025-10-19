@@ -28,13 +28,6 @@ import hud
 from hud import log
 
 try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except Exception:
-    pass
-
-try:
     import cohere
 except Exception:  # pragma: no cover - dependencia opcional
     cohere = None
@@ -45,9 +38,11 @@ logger = logging.getLogger("rai.client")
 usuario = os.getlogin()
 texto_acumulado = ""
 CATALOGO_PATH = Path(__file__).with_name("apps.json")
+COHERE_LOG_PATH = Path(__file__).with_name("cohere.log")
 catalogo_lock = threading.Lock()
 _catalogo_cache: Optional[Dict[str, Any]] = None
-COHERE_MODEL = os.getenv("COHERE_MODEL", "command-r-plus")
+COHERE_MODEL = os.getenv("COHERE_MODEL", "command-r-plus-08-2024")
+COHERE_API_KEY = "ppBVjJhTQ1vCU7WVBKt1wYKpDUZW97LhZ1PrHsBJ"
 _cohere_client: Optional["cohere.Client"] = None
 
 
@@ -87,6 +82,16 @@ def _guardar_catalogo_unlocked(catalogo: Dict[str, Any]) -> None:
                 pass
 
 
+def _log_cohere_event(titulo: str, contenido: str) -> None:
+    marca = datetime.datetime.now().isoformat(timespec="seconds")
+    linea = f"[{marca}] {titulo}\n{contenido}\n{'-' * 60}\n"
+    try:
+        with COHERE_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(linea)
+    except Exception:
+        logger.debug("No pude escribir el log de Cohere.")
+
+
 def cargar_catalogo() -> Dict[str, Any]:
     with catalogo_lock:
         return _asegurar_catalogo_unlocked()
@@ -107,9 +112,9 @@ def obtener_cliente_cohere() -> Optional["cohere.Client"]:
     if _cohere_client is not None:
         return _cohere_client
 
-    api_key = os.getenv("ul9qI4KYIpzGJXxM2hHHBTHdAdLjxBJZPXWc0YDm") # COHERE_API_KEY
+    api_key = COHERE_API_KEY
     if not api_key:
-        logger.warning("COHERE_API_KEY no está definido en el entorno.")
+        logger.error("COHERE_API_KEY no está configurada en el código.")
         return None
     try:
         _cohere_client = cohere.Client(api_key)
@@ -162,15 +167,22 @@ def generar_comandos_con_cohere(
     catalogo = catalogo_actual or cargar_catalogo()
     contexto_catalogo = _componer_contexto_catalogo(catalogo, contexto_app)
     instrucciones = (
-        "Genera solo un JSON con esta forma:\n"
+        "Eres un asistente que genera comandos exactos para Windows.\n"
+        "Dispones de un catálogo JSON con aplicaciones instaladas. Cada entrada contiene:\n"
+        "- nombre/id\n"
+        '- tipo: "exe" o "uwp"\n'
+        "- launch: ruta o comando EXACTO para abrir la app\n"
+        "- paths: rutas de instalación\n"
+        "- acciones: comandos conocidos (abrir, cerrar, etc.)\n"
+        "Al generar comandos:\n"
+        "1. Usa siempre la ruta de launch/paths cuando exista.\n"
+        '   - Si lanzas un .exe, responde con `start "" \"RUTA\"` o directamente `"RUTA"`.\n'
+        "2. No inventes rutas ni dependas de `start appname` genérico.\n"
+        "3. Para apps UWP DEBES devolver exactamente `explorer.exe shell:appsFolder\\<AppUserModelID>` (incluye la barra invertida).\n"
+        "4. Si necesitas varias acciones, colócalas en orden en la lista.\n"
+        "5. Responde únicamente el JSON siguiente, sin texto adicional:\n"
         '{\n  "comandos": ["..."],\n  "descripcion": "explicacion breve en español"\n}\n'
-        "- Cada comando debe ser válido para cmd.exe o PowerShell, o usar los prefijos soportados:\n"
-        '  * "tecla:<combos>" para accesos rápidos (ejemplo: "tecla:win+d").\n'
-        '  * "ventana:<accion>:<nombre>" para minimizar/maximizar/enfocar una ventana.\n'
-        "- Para cerrar procesos usa taskkill adecuado.\n"
-        "- Si necesitas varias acciones, pon cada comando en la lista en orden.\n"
-        "- Responde únicamente el JSON, sin texto adicional.\n"
-        "- Si no puedes ayudar, responde con \"comandos\": []."
+        "Si no puedes ayudar, devuelve `\"comandos\": []`."
     )
     prompt = (
         f"{instrucciones}\n"
@@ -179,25 +191,35 @@ def generar_comandos_con_cohere(
     )
 
     respuesta_texto = ""
+    _log_cohere_event("PROMPT", prompt)
     try:
-        respuesta = cliente.generate(
+        respuesta_chat = cliente.chat(
             model=COHERE_MODEL,
-            prompt=prompt,
-            max_tokens=200,
+            message=prompt,
             temperature=0.1,
-            stop_sequences=[],
         )
-        if respuesta.generations:
-            respuesta_texto = (respuesta.generations[0].text or "").strip()
-    except AttributeError:
-        try:
-            respuesta_chat = cliente.chat(model=COHERE_MODEL, message=prompt, temperature=0.1)
-            respuesta_texto = getattr(respuesta_chat, "text", "") or ""
-        except Exception as exc:
-            logger.error(f"Cohere chat falló: {exc}")
-            return None
+        logger.debug("COHERE PROMPT:\n%s", prompt)
+        logger.debug("COHERE RAW RESPONSE: %s", respuesta_chat)
+        _log_cohere_event("RAW RESPONSE", str(respuesta_chat))
+        if hasattr(respuesta_chat, "text") and respuesta_chat.text:
+            respuesta_texto = respuesta_chat.text.strip()
+        elif hasattr(respuesta_chat, "message"):
+            contenido = getattr(respuesta_chat.message, "content", [])
+            partes: List[str] = []
+            for bloque in contenido or []:
+                if isinstance(bloque, dict):
+                    if bloque.get("type") == "text":
+                        partes.append(str(bloque.get("text", "")))
+                else:
+                    tipo = getattr(bloque, "type", None)
+                    texto = getattr(bloque, "text", "")
+                    if tipo == "text" and texto:
+                        partes.append(str(texto))
+            respuesta_texto = "".join(partes).strip()
+        elif hasattr(respuesta_chat, "output_text"):
+            respuesta_texto = (respuesta_chat.output_text or "").strip()
     except Exception as exc:
-        logger.error(f"Cohere generate falló: {exc}")
+        logger.error(f"Cohere chat falló: {exc}")
         return None
 
     if not respuesta_texto:
@@ -221,6 +243,11 @@ def generar_comandos_con_cohere(
     descripcion = datos.get("descripcion")
     if not isinstance(descripcion, str):
         descripcion = ""
+
+    try:
+        _log_cohere_event("COMANDOS PARSEADOS", json.dumps({"comandos": comandos_filtrados, "descripcion": descripcion}, ensure_ascii=False, indent=2))
+    except Exception:
+        logger.debug("No pude registrar el resultado parseado.")
 
     return {"comandos": comandos_filtrados, "descripcion": descripcion}
 
@@ -489,7 +516,38 @@ def escuchar_hotword() -> None:
 
 def ejecutar_comando_cmd(comando: str) -> bool:
     try:
-        comando = comando.replace("TuUsuario", usuario).replace("%USERNAME%", usuario)
+        comando = comando.replace("TuUsuario", usuario).replace("%USERNAME%", usuario).strip()
+
+        if comando.lower().startswith("start "):
+            partes = comando.split(maxsplit=1)
+            if len(partes) == 2:
+                resto = partes[1].strip().strip('"')
+                comando = f'start "" "{resto}"'
+
+        ruta_candidata = _extraer_ruta_exe(comando)
+        if ruta_candidata:
+            ruta_ajustada = _ajustar_ruta_disponible(ruta_candidata)
+            if ruta_ajustada and ruta_ajustada != ruta_candidata:
+                if comando.lower().startswith("start \"\" \""):
+                    comando = f'start "" "{ruta_ajustada}"'
+                else:
+                    comando = ruta_ajustada
+
+        if comando.lower().startswith("start \"\" \"") and comando.lower().endswith(".exe\""):
+            ruta_final = _extraer_ruta_exe(comando)
+            if ruta_final and os.path.exists(ruta_final):
+                subprocess.Popen(ruta_final)
+                logger.info("Ejecutable lanzado desde start.")
+                return True
+        elif comando.lower().endswith(".exe") and os.path.exists(comando.strip('"')):
+            subprocess.Popen(comando.strip('"'))
+            logger.info("Ejecutable lanzado directamente.")
+            return True
+
+        if comando.lower().startswith("explorer.exe shell:appsfolder") and "shell:appsfolder\\" not in comando.lower():
+            comando = comando.replace("shell:appsFolder", "shell:appsFolder\\")
+
+        logger.debug("Comando tras normalización: %s", comando)
 
         if comando.startswith("explorer.exe shell:appsFolder\\"):
             subprocess.Popen(comando, shell=True)
@@ -576,6 +634,21 @@ def _detectar_intencion_catalogo(texto: str) -> Optional[tuple[str, str]]:
     return None
 
 
+def comando_abrir_desde_app(app: Dict[str, Any]) -> Optional[str]:
+    tipo = str(app.get("tipo") or app.get("type") or "").lower()
+    launch = str(app.get("launch") or "").strip()
+    acciones = app.get("acciones") or {}
+    if isinstance(acciones, dict):
+        launch_accion = str(acciones.get("abrir") or "").strip()
+        if launch_accion:
+            return launch_accion.replace("%USERNAME%", usuario)
+    if not launch:
+        return None
+    if tipo == "exe":
+        return f'start "" "{launch.replace("%USERNAME%", usuario)}"'
+    return launch
+
+
 def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por compatibilidad
     del timeout  # no se usa sin servidor
     global texto_acumulado
@@ -584,55 +657,59 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
         return
 
     mensaje = texto_acumulado.strip()
-    logger.info("Procesando orden local: %s", mensaje)
+    logger.info("Consultando Cohere para la orden: %s", mensaje)
+
+    contexto_app = None
+    catalogo_ref: Optional[Dict[str, Any]] = None
+    accion_objetivo: Optional[str] = None
+    nombre_objetivo: Optional[str] = None
 
     intencion = _detectar_intencion_catalogo(mensaje)
     if intencion:
-        accion, nombre_app = intencion
-        if accion == "abrir":
-            resultado = buscar_comando_por_nombre(nombre_app)
-            logger.debug("Resultado buscar_comando_por_nombre: %s", resultado)
-            if not resultado or any(r is None for r in resultado):
-                logger.warning("No encontré comando válido para '%s'. Intento con Cohere.", nombre_app)
-            else:
-                _, comando_db, tipo = resultado
-                if tipo == "exe":
-                    comando_final = f'start "" "{comando_db.replace("%USERNAME%", usuario)}"'
-                elif tipo == "uwp":
-                    comando_final = comando_db
-                else:
-                    comando_final = comando_db
-                hud.log(f"Ejecutando [ {nombre_app} ]...")
-                if ejecutar_comando_cmd(comando_final):
-                    hud.log(f"Listo, {nombre_app} fue abierto.")
-                    actualizar_ultima_vez(nombre_app)
-                    texto_acumulado = ""
-                    threading.Timer(2, hud.ocultar).start()
-                    return
-                hud.log(f"No se pudo abrir [ {nombre_app} ]")
-                texto_acumulado = ""
-                threading.Timer(2, hud.ocultar).start()
-                return
-        elif accion == "cerrar":
-            if ejecutar_accion_desde_catalogo(nombre_app, "cerrar"):
-                hud.log(f"Listo, {nombre_app} fue cerrado.")
-            else:
-                hud.log(f"No se pudo cerrar [ {nombre_app} ]")
-            texto_acumulado = ""
-            threading.Timer(2, hud.ocultar).start()
-            return
+        accion_objetivo, nombre_objetivo = intencion
+        catalogo_ref = cargar_catalogo()
+        if nombre_objetivo:
+            contexto_app = _buscar_app(catalogo_ref, nombre_objetivo)
 
-    sugerencia = generar_comandos_con_cohere(mensaje)
+    sugerencia = generar_comandos_con_cohere(
+        mensaje,
+        contexto_app=contexto_app,
+        catalogo_actual=catalogo_ref,
+    )
     if sugerencia:
         descripcion = sugerencia.get("descripcion")
         if descripcion:
             hud.log(descripcion)
-        comandos_generados = ";".join(sugerencia["comandos"])
+        comandos = list(sugerencia["comandos"])
+        if accion_objetivo == "abrir" and contexto_app:
+            comando_catalogo = comando_abrir_desde_app(contexto_app) or contexto_app.get("comando")
+            if comando_catalogo:
+                comandos[0] = comando_catalogo
+        comandos_generados = ";".join(comandos)
         if ejecutar_comandos_en_cadena(comandos_generados):
             texto_acumulado = ""
             threading.Timer(2, hud.ocultar).start()
             return
         logger.warning("Los comandos sugeridos por Cohere fallaron: %s", comandos_generados)
+
+    if accion_objetivo and nombre_objetivo:
+        logger.info("Cohere falló, intento resolver '%s %s' desde el catálogo.", accion_objetivo, nombre_objetivo)
+        if accion_objetivo == "abrir" and contexto_app:
+            comando_final = comando_abrir_desde_app(contexto_app) or contexto_app.get("comando")
+            if comando_final:
+                hud.log(f"Ejecutando [ {nombre_objetivo} ]...")
+                if ejecutar_comando_cmd(comando_final):
+                    hud.log(f"Listo, {nombre_objetivo} fue abierto.")
+                    actualizar_ultima_vez(nombre_objetivo)
+                    texto_acumulado = ""
+                    threading.Timer(2, hud.ocultar).start()
+                    return
+        elif accion_objetivo == "cerrar":
+            if ejecutar_accion_desde_catalogo(nombre_objetivo, "cerrar"):
+                hud.log(f"Listo, {nombre_objetivo} fue cerrado.")
+                texto_acumulado = ""
+                threading.Timer(2, hud.ocultar).start()
+                return
 
     hud.log("No pude interpretar la orden.")
     texto_acumulado = ""
