@@ -12,9 +12,11 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -48,6 +50,13 @@ _cohere_client: Optional["cohere.Client"] = None
 
 def _normalizar(texto: str) -> str:
     return re.sub(r"\s+", " ", texto.strip().lower())
+
+
+def _sin_acentos(texto: str) -> str:
+    """Devuelve el texto en minusculas y sin acentos para comparaciones flexibles."""
+    texto_lower = texto.lower()
+    descompuesto = unicodedata.normalize("NFD", texto_lower)
+    return "".join(ch for ch in descompuesto if not unicodedata.combining(ch))
 
 
 def _asegurar_catalogo_unlocked() -> Dict[str, Any]:
@@ -154,6 +163,133 @@ def _extraer_json(texto: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _extraer_comandos_desde_texto(texto: str) -> List[str]:
+    if not texto:
+        return []
+
+    bruto = texto.strip()
+    if not bruto or bruto.upper() == "NINGUNO":
+        return []
+
+    comandos: List[str] = []
+    en_bloque_codigo = False
+
+    for linea in bruto.splitlines():
+        contenido = linea.strip()
+        if not contenido:
+            continue
+        if contenido.startswith("```"):
+            en_bloque_codigo = not en_bloque_codigo
+            continue
+        if not en_bloque_codigo and contenido.lower().startswith(("comandos", "descripcion")):
+            continue
+        if contenido in {"[", "]", "{", "}"}:
+            continue
+        if contenido.startswith('"') and contenido.endswith('"') and len(contenido) >= 2:
+            contenido = contenido[1:-1].strip()
+        elif contenido.startswith("'") and contenido.endswith("'") and len(contenido) >= 2:
+            contenido = contenido[1:-1].strip()
+        if contenido.endswith(","):
+            contenido = contenido[:-1].rstrip()
+        if not contenido:
+            continue
+        comandos.append(contenido)
+
+    if not comandos:
+        candidato = bruto
+        if candidato.startswith('"') and candidato.endswith('"') and len(candidato) >= 2:
+            candidato = candidato[1:-1].strip()
+        elif candidato.startswith("'") and candidato.endswith("'") and len(candidato) >= 2:
+            candidato = candidato[1:-1].strip()
+        candidato = candidato.rstrip(",").strip()
+        if candidato and candidato.upper() != "NINGUNO":
+            comandos.append(candidato)
+
+    return comandos
+
+
+def _extraer_ruta_exe(comando: str) -> Optional[str]:
+    """Localiza la primera ruta de .exe presente en un comando plano."""
+    if not comando:
+        return None
+
+    texto = comando.strip()
+    if not texto:
+        return None
+
+    comando_lower = texto.lower()
+
+    def _normalizar_candidato(candidato: str) -> str:
+        limpio = candidato.strip().strip('"')
+        expandido = os.path.expanduser(os.path.expandvars(limpio))
+        return os.path.normpath(expandido)
+
+    patrones = re.findall(r'"([^"]+\.exe)"', texto, flags=re.IGNORECASE)
+    for candidato in patrones:
+        ruta = _normalizar_candidato(candidato)
+        if ruta.lower().endswith("explorer.exe") and "shell:appsfolder" in comando_lower:
+            continue
+        return ruta
+
+    for fragmento in re.split(r"\s+", texto):
+        if not fragmento:
+            continue
+        candidato = fragmento.strip().strip('"')
+        if not candidato.lower().endswith(".exe"):
+            continue
+        if candidato.lower() == "explorer.exe" and "shell:appsfolder" in comando_lower:
+            continue
+        return _normalizar_candidato(candidato)
+
+    return None
+
+
+def _ajustar_ruta_disponible(ruta: str) -> Optional[str]:
+    """Devuelve una ruta existente ajustando variables, comillas y variantes comunes."""
+    if not ruta:
+        return None
+
+    ruta_limpia = ruta.strip().strip('"')
+    if not ruta_limpia:
+        return None
+
+    candidatos: List[str] = []
+
+    def _agregar(candidato: str) -> None:
+        if not candidato:
+            return
+        norm = os.path.normpath(candidato)
+        if norm not in candidatos:
+            candidatos.append(norm)
+
+    expandida = os.path.expanduser(os.path.expandvars(ruta_limpia))
+    _agregar(expandida)
+
+    exe_name = Path(expandida).name.lower()
+    encontrado = shutil.which(exe_name if exe_name else expandida)
+    if encontrado:
+        _agregar(encontrado)
+
+    pf = os.environ.get("ProgramFiles")
+    pfx86 = os.environ.get("ProgramFiles(x86)")
+    expandida_lower = expandida.lower()
+    if pf and pfx86:
+        pf_lower = pf.lower()
+        pfx86_lower = pfx86.lower()
+        if expandida_lower.startswith(pfx86_lower):
+            resto = expandida[len(pfx86):].lstrip("\\/")
+            _agregar(os.path.join(pf, resto))
+        elif expandida_lower.startswith(pf_lower):
+            resto = expandida[len(pf):].lstrip("\\/")
+            _agregar(os.path.join(pfx86, resto))
+
+    for candidato in candidatos:
+        if os.path.exists(candidato):
+            return candidato
+
+    return None
+
+
 def generar_comandos_con_cohere(
     peticion: str,
     *,
@@ -168,21 +304,23 @@ def generar_comandos_con_cohere(
     contexto_catalogo = _componer_contexto_catalogo(catalogo, contexto_app)
     instrucciones = (
         "Eres un asistente que genera comandos exactos para Windows.\n"
-        "Dispones de un catálogo JSON con aplicaciones instaladas. Cada entrada contiene:\n"
+        "Dispones de un catalogo JSON con aplicaciones instaladas. Cada entrada contiene: \n"
         "- nombre/id\n"
         '- tipo: "exe" o "uwp"\n'
         "- launch: ruta o comando EXACTO para abrir la app\n"
-        "- paths: rutas de instalación\n"
+        "- paths: rutas de instalacion\n"
         "- acciones: comandos conocidos (abrir, cerrar, etc.)\n"
-        "Al generar comandos:\n"
+        "Al generar comandos: \n"
         "1. Usa siempre la ruta de launch/paths cuando exista.\n"
-        '   - Si lanzas un .exe, responde con `start "" \"RUTA\"` o directamente `"RUTA"`.\n'
-        "2. No inventes rutas ni dependas de `start appname` genérico.\n"
-        "3. Para apps UWP DEBES devolver exactamente `explorer.exe shell:appsFolder\\<AppUserModelID>` (incluye la barra invertida).\n"
-        "4. Si necesitas varias acciones, colócalas en orden en la lista.\n"
-        "5. Responde únicamente el JSON siguiente, sin texto adicional:\n"
-        '{\n  "comandos": ["..."],\n  "descripcion": "explicacion breve en español"\n}\n'
-        "Si no puedes ayudar, devuelve `\"comandos\": []`."
+        '   - Si lanzas un .exe, responde con start "" \"RUTA\" o directamente "RUTA".\n'
+        "2. No inventes rutas ni dependas de start appname generico.\n"
+        "3. Para apps UWP DEBES devolver exactamente explorer.exe shell:appsFolder\\<AppUserModelID> (incluye la barra invertida).\n"
+        "4. Si necesitas varias acciones, respeta el orden de ejecucion.\n"
+        "5. Responde unicamente con el comando ejecutable en texto plano; sin JSON ni explicaciones.\n"
+        "   - Si envias varios comandos, escribe uno por linea en el orden correcto.\n"
+        "6. Corrige errores tipograficos leves apoyandote en el catalogo antes de rendirte.\n"
+        "7. Nunca respondas NINGUNO si existe una coincidencia cercana en el catalogo.\n"
+        "Si no puedes ayudar, responde exactamente NINGUNO."
     )
     prompt = (
         f"{instrucciones}\n"
@@ -226,23 +364,27 @@ def generar_comandos_con_cohere(
         logger.warning("Cohere no devolvió texto.")
         return None
 
+    descripcion = ""
+    comandos_filtrados: List[str] = []
+
     datos = _extraer_json(respuesta_texto)
-    if not datos:
-        logger.warning(f"Cohere devolvió un formato inesperado: {respuesta_texto}")
-        return None
-
-    comandos = datos.get("comandos")
-    if not isinstance(comandos, list):
-        logger.warning("Cohere devolvió comandos inválidos.")
-        return None
-
-    comandos_filtrados = [cmd.strip() for cmd in comandos if isinstance(cmd, str) and cmd.strip()]
-    if not comandos_filtrados:
-        return None
-
-    descripcion = datos.get("descripcion")
-    if not isinstance(descripcion, str):
-        descripcion = ""
+    if datos:
+        comandos_obj = datos.get("comandos")
+        if isinstance(comandos_obj, list):
+            comandos_filtrados = [cmd.strip() for cmd in comandos_obj if isinstance(cmd, str) and cmd.strip()]
+        elif isinstance(comandos_obj, str) and comandos_obj.strip():
+            comandos_filtrados = [comandos_obj.strip()]
+        else:
+            logger.warning("Cohere devolvio comandos invalidos.")
+            return None
+        descripcion_obj = datos.get("descripcion")
+        if isinstance(descripcion_obj, str):
+            descripcion = descripcion_obj
+    else:
+        comandos_filtrados = _extraer_comandos_desde_texto(respuesta_texto)
+        if not comandos_filtrados:
+            logger.warning(f"Cohere no proporciono comandos interpretables: {respuesta_texto}")
+            return None
 
     try:
         _log_cohere_event("COMANDOS PARSEADOS", json.dumps({"comandos": comandos_filtrados, "descripcion": descripcion}, ensure_ascii=False, indent=2))
@@ -612,22 +754,31 @@ def es_pregunta_larga(texto: str) -> bool:
 
 
 def _detectar_intencion_catalogo(texto: str) -> Optional[tuple[str, str]]:
+    texto_base = texto or ""
+    texto_normalizado = _sin_acentos(texto_base)
     patrones = [
-        (r"\b(abrir|iniciar)\s+([^\.,;]+)", "abrir"),
-        (r"\b(cerrar)\s+([^\.,;]+)", "cerrar"),
+        (r"\b(abrir|abri|abre|abrime|iniciar|enciende|encender)\s+([^\.,;]+)", "abrir"),
+        (r"\b(cerrar|cerra|cerrame|termina|detener)\s+([^\.,;]+)", "cerrar"),
     ]
     for patron, accion in patrones:
-        match = re.search(patron, texto, re.IGNORECASE)
+        match = re.search(patron, texto_normalizado, re.IGNORECASE)
         if not match:
             continue
-        fragmento = match.group(2).strip()
+        inicio = match.start(2)
+        fin = match.end(2)
+        fragmento_original = texto_base[inicio:fin].strip()
+        fragmento_normalizado = texto_normalizado[inicio:fin].strip()
+        fragmento = fragmento_original or fragmento_normalizado
         if not fragmento:
             continue
-        # Corto en conectores comunes
+        # Corto en conectores comunes, utilizando el fragmento sin acentos para buscar.
+        fragmento_sin_acentos = _sin_acentos(fragmento)
         for separador in [" y ", " luego ", " despues ", " entonces ", ",", ".", ";"]:
-            pos = fragmento.lower().find(separador.strip())
+            separador_busqueda = separador.strip()
+            pos = fragmento_sin_acentos.find(separador_busqueda)
             if pos > 0:
                 fragmento = fragmento[:pos].strip()
+                fragmento_sin_acentos = fragmento_sin_acentos[:pos].strip()
                 break
         if fragmento:
             return accion, fragmento

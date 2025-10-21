@@ -6,8 +6,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
-from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict, cast
 
 try:
     import pygetwindow as gw  # type: ignore
@@ -79,6 +80,27 @@ def _normalize_entry(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 exe_name = candidate
                 break
 
+    raw_actions = data.get("actions") or data.get("acciones") or {}
+    actions: Dict[str, List[str]] = {}
+    if isinstance(raw_actions, dict):
+        for raw_key, raw_value in raw_actions.items():
+            if not isinstance(raw_key, str):
+                continue
+            key = raw_key.strip().lower()
+            if not key:
+                continue
+            commands: List[str] = []
+            if isinstance(raw_value, str):
+                value = raw_value.strip()
+                if value:
+                    commands.append(value)
+            elif isinstance(raw_value, (list, tuple)):
+                for item in raw_value:
+                    if isinstance(item, str) and item.strip():
+                        commands.append(item.strip())
+            if commands:
+                actions[key] = commands
+
     normalized = {
         "id": app_id,
         "aliases": aliases,
@@ -88,6 +110,8 @@ def _normalize_entry(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "exe_name": exe_name,
         "window_hints": window_hints,
     }
+    if actions:
+        normalized["actions"] = actions
     return normalized
 
 
@@ -180,6 +204,85 @@ def find_app_by_alias(alias: str) -> Optional[Dict[str, object]]:
     return None
 
 
+def _actions_map(app: Dict[str, Any]) -> Dict[str, List[str]]:
+    actions = app.get("actions")
+    if isinstance(actions, dict):
+        return actions
+    return {}
+
+
+def _select_action_commands(app: Dict[str, Any], keys: Iterable[str]) -> List[str]:
+    actions = _actions_map(app)
+    for key in keys:
+        normalized = str(key).strip().lower()
+        if not normalized:
+            continue
+        commands = actions.get(normalized)
+        if isinstance(commands, list) and commands:
+            return commands
+    return []
+
+
+_CONTROL_ACTION_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "minimize": ("minimize", "minimizar", "ocultar"),
+    "maximize": ("maximize", "maximizar"),
+    "focus": ("focus", "enfocar", "activar", "mostrar"),
+}
+
+
+def _run_command(command: str, *, wait: bool) -> Tuple[bool, str]:
+    normalized = command.strip()
+    if not normalized:
+        return False, "Comando vacio"
+    try:
+        if wait:
+            result = subprocess.run(normalized, shell=True, capture_output=True, text=True)
+            if result.returncode == 0:
+                salida = (result.stdout or "").strip()
+                return True, salida
+            error = (result.stderr or "").strip() or (result.stdout or "").strip() or f"Fallo ({result.returncode})"
+            return False, error
+        try:
+            parts = shlex.split(normalized, posix=False)
+        except ValueError:
+            parts = []
+        if parts:
+            executable = os.path.expandvars(parts[0].strip('"'))
+            if os.path.isfile(executable):
+                parts[0] = executable
+                subprocess.Popen(parts)
+                return True, ""
+        path_candidate = os.path.expandvars(normalized.strip('"'))
+        if os.path.isfile(path_candidate):
+            subprocess.Popen([path_candidate])
+            return True, ""
+        subprocess.Popen(normalized, shell=True)
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _run_commands(commands: Iterable[str], *, wait: bool) -> Tuple[bool, str]:
+    last_message = ""
+    for command in commands:
+        ok, message = _run_command(command, wait=wait)
+        if not ok:
+            return False, message
+        if message:
+            last_message = message
+    return True, last_message
+
+
+def _control_success_message(action: str, app_id: str) -> str:
+    if action == "minimize":
+        return f"Minimicé {app_id}"
+    if action == "maximize":
+        return f"Maximicé {app_id}"
+    if action == "focus":
+        return f"Puse en foco {app_id}"
+    return f"{action} {app_id}"
+
+
 def do_action(action: str, target: Optional[str], args: Dict[str, object]) -> Tuple[bool, str]:
     if os.name != "nt":
         return False, "Solo disponible en Windows"
@@ -208,12 +311,20 @@ def _open_app(target: Optional[str]) -> Tuple[bool, str]:
     if not app:
         return False, "Aplicación no reconocida"
 
+    action_error: Optional[str] = None
+    action_commands = _select_action_commands(app, ("abrir", "open", "launch", "iniciar", "start"))
+    if action_commands:
+        ok, message = _run_commands(action_commands, wait=False)
+        if ok:
+            return True, message or f"Abriendo {app['id']}"
+        action_error = message or "No pude ejecutar el comando registrado"
+
     app_type = app.get("type", "exe")
     launch = app.get("launch")
 
     if app_type == "uwp":
         if not launch:
-            return False, "No tengo el comando para abrir la aplicación"
+            return False, action_error or "No tengo el comando para abrir la aplicación"
         try:
             subprocess.Popen(str(launch), shell=True)
             return True, f"Abriendo {app['id']}"
@@ -246,7 +357,7 @@ def _open_app(target: Optional[str]) -> Tuple[bool, str]:
             return True, f"Abriendo {app['id']}"
         except Exception:
             pass
-    return False, "No encontré la aplicación instalada"
+    return False, action_error or "No encontré la aplicación instalada"
 
 
 def _close_app(target: Optional[str]) -> Tuple[bool, str]:
@@ -255,6 +366,14 @@ def _close_app(target: Optional[str]) -> Tuple[bool, str]:
     app = find_app_by_alias(target)
     if not app:
         return False, "Aplicación no reconocida"
+
+    action_error: Optional[str] = None
+    action_commands = _select_action_commands(app, ("cerrar", "close", "terminate", "detener", "stop", "salir"))
+    if action_commands:
+        ok, message = _run_commands(action_commands, wait=True)
+        if ok:
+            return True, message or f"Cerré {app['id']}"
+        action_error = message or "No pude ejecutar el comando registrado"
 
     exe = app.get("exe_name")
     taskkill_message: Optional[str] = None
@@ -285,8 +404,8 @@ def _close_app(target: Optional[str]) -> Tuple[bool, str]:
         return True, window_message
 
     if exe:
-        return False, taskkill_message or window_message or "No se pudo cerrar"
-    return False, window_message or "Necesito pygetwindow para cerrar esta aplicación"
+        return False, taskkill_message or action_error or window_message or "No se pudo cerrar"
+    return False, action_error or window_message or "Necesito pygetwindow para cerrar esta aplicación"
 
 
 def _close_by_window(app: Dict[str, Any]) -> Tuple[bool, str]:
@@ -322,14 +441,26 @@ def _open_task_manager() -> Tuple[bool, str]:
 
 
 def _control_window(target: Optional[str], action: str) -> Tuple[bool, str]:
-    if gw is None:
-        return False, "Instala pygetwindow para controlar ventanas"
     if not target:
         return False, "¿Qué ventana debo manipular?"
 
-    app = find_app_by_alias(target)
-    if not app:
+    app_obj = find_app_by_alias(target)
+    if not app_obj:
         return False, "Aplicación desconocida"
+    app = cast(Dict[str, Any], app_obj)
+    app_id = str(app.get("id") or target)
+
+    alias_keys = _CONTROL_ACTION_ALIASES.get(action, (action,))
+    custom_error: Optional[str] = None
+    custom_commands = _select_action_commands(app, alias_keys)
+    if custom_commands:
+        ok, message = _run_commands(custom_commands, wait=False)
+        if ok:
+            return True, message or _control_success_message(action, app_id)
+        custom_error = message or "No pude ejecutar el comando registrado"
+
+    if gw is None:
+        return False, custom_error or "Instala pygetwindow para controlar ventanas"
 
     hints = app.get("window_hints") or []
     for hint in hints:
@@ -343,16 +474,16 @@ def _control_window(target: Optional[str], action: str) -> Tuple[bool, str]:
             try:
                 if action == "minimize":
                     window.minimize()
-                    return True, f"Minimicé {app['id']}"
+                    return True, _control_success_message(action, app_id)
                 if action == "maximize":
                     window.maximize()
-                    return True, f"Maximicé {app['id']}"
+                    return True, _control_success_message(action, app_id)
                 if action == "focus":
                     window.activate()
-                    return True, f"Puse en foco {app['id']}"
+                    return True, _control_success_message(action, app_id)
             except Exception as exc:
                 return False, f"No pude controlar la ventana: {exc}"
-    return False, "No encontré la ventana"
+    return False, custom_error or "No encontré la ventana"
 
 
 def _resolve_path_from_app(app: Dict[str, Any]) -> str:
