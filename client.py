@@ -49,6 +49,11 @@ COHERE_MODEL = os.getenv("COHERE_MODEL", "command-r-plus-08-2024")
 COHERE_API_KEY = "ppBVjJhTQ1vCU7WVBKt1wYKpDUZW97LhZ1PrHsBJ"
 _cohere_client: Optional["cohere.Client"] = None
 historial_acciones: Deque[Dict[str, Any]] = deque(maxlen=5)
+memoria_redaccion: Dict[str, Any] = {
+    "texto": "",
+    "solicitud": "",
+    "instrucciones": [],
+}
 USER32 = ctypes.windll.user32
 KERNEL32 = ctypes.windll.kernel32
 
@@ -354,6 +359,40 @@ def registrar_accion(accion: Dict[str, Any]) -> None:
     logger.debug("Historial actualizado con: %s", accion_copia)
 
 
+
+
+def _reiniciar_memoria_redaccion(texto: str, solicitud: str) -> None:
+    memoria_redaccion["texto"] = texto.strip()
+    memoria_redaccion["solicitud"] = solicitud.strip()
+    memoria_redaccion["instrucciones"] = []
+
+
+def _actualizar_texto_memoria(texto: str) -> None:
+    memoria_redaccion["texto"] = texto.strip()
+
+
+def _agregar_instruccion_memoria(instruccion: str) -> None:
+    instruccion_limpia = (instruccion or "").strip()
+    if not instruccion_limpia:
+        return
+    instrucciones = memoria_redaccion.get("instrucciones")
+    if not isinstance(instrucciones, list):
+        instrucciones = []
+    instrucciones.append(instruccion_limpia)
+    if len(instrucciones) > 5:
+        instrucciones = instrucciones[-5:]
+    memoria_redaccion["instrucciones"] = instrucciones
+
+
+def _obtener_instrucciones_memoria() -> List[str]:
+    instrucciones = memoria_redaccion.get("instrucciones")
+    if isinstance(instrucciones, list):
+        return [str(instr).strip() for instr in instrucciones if str(instr).strip()]
+    return []
+
+
+def _hay_redaccion_en_memoria() -> bool:
+    return bool(str(memoria_redaccion.get("texto") or "").strip())
 
 def _log_cohere_event(titulo: str, contenido: str) -> None:
     marca = datetime.datetime.now().isoformat(timespec="seconds")
@@ -686,6 +725,68 @@ def generar_respuesta_con_cohere(mensaje: str) -> Optional[str]:
     return texto
 
 
+
+
+
+
+
+def generar_redaccion_desde_memoria(nueva_instruccion: str) -> Optional[str]:
+    texto_actual = str(memoria_redaccion.get("texto") or "").strip()
+    if not texto_actual:
+        return None
+    cliente = obtener_cliente_cohere()
+    if not cliente:
+        return None
+    solicitud_original = str(memoria_redaccion.get("solicitud") or "").strip()
+    instrucciones_previas = _obtener_instrucciones_memoria()
+    pedidos_previos = ""
+    if instrucciones_previas:
+        pedidos_previos = "\nPedidos adicionales previos:\n" + "\n".join(f"- {item}" for item in instrucciones_previas)
+    instrucciones_generales = (
+        "Eres un redactor en español rioplatense. Ajusta el mensaje original para que cumpla las nuevas indicaciones. "
+        "Mantén el mismo destinatario y propósito. Devuelve únicamente el texto final listo para enviar, sin comillas ni explicaciones."
+    )
+    prompt = (
+        f"{instrucciones_generales}\n"
+        f"Solicitud original: {solicitud_original or 'Mensaje para redactar'}\n"
+        f"Texto actual:\n{texto_actual}\n"
+    )
+    if pedidos_previos:
+        prompt += f"{pedidos_previos}\n"
+    prompt += f"Nuevo pedido del usuario: {nueva_instruccion.strip()}\nTexto ajustado:"
+    _log_cohere_event("PROMPT_REDACCION_AJUSTADA", prompt)
+    try:
+        respuesta = cliente.chat(
+            model=COHERE_MODEL,
+            message=prompt,
+            temperature=0.5,
+        )
+    except Exception as exc:
+        logger.error(f"Cohere ajuste redacción falló: {exc}")
+        return None
+    texto_respuesta = ""
+    if hasattr(respuesta, "text") and respuesta.text:
+        texto_respuesta = respuesta.text.strip()
+    elif hasattr(respuesta, "message"):
+        contenido = getattr(respuesta.message, "content", [])
+        partes: List[str] = []
+        for bloque in contenido or []:
+            if isinstance(bloque, dict) and bloque.get("type") == "text":
+                partes.append(str(bloque.get("text", "")))
+        texto_respuesta = "".join(partes).strip()
+    elif hasattr(respuesta, "output_text"):
+        texto_respuesta = (respuesta.output_text or "").strip()
+    texto_respuesta = texto_respuesta.strip()
+    if not texto_respuesta:
+        return None
+    if texto_respuesta.startswith('"') and texto_respuesta.endswith('"'):
+        texto_respuesta = texto_respuesta[1:-1].strip()
+    if not texto_respuesta:
+        return None
+    _log_cohere_event("RESPUESTA_REDACCION_AJUSTADA", texto_respuesta)
+    return texto_respuesta
+
+
 def _buscar_app(catalogo: Dict[str, Any], nombre_app: str) -> Optional[Dict[str, Any]]:
     objetivo = _normalizar(nombre_app)
     for app in catalogo.get("aplicaciones", []):
@@ -972,9 +1073,23 @@ def grabar_y_procesar_orden() -> None:
 
 def escuchar_fragmento() -> Optional[str]:
     recognizer = sr.Recognizer()
-    with sr.Microphone() as source:
-        recognizer.adjust_for_ambient_noise(source, duration=0.5)
-        audio = recognizer.listen(source, phrase_time_limit=5)
+    audio: Optional["sr.AudioData"] = None
+    try:
+        with sr.Microphone() as source:
+            try:
+                recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            except AssertionError as exc:
+                logger.error("No pude calibrar el micrófono: %s", exc)
+                return None
+            audio = recognizer.listen(source, phrase_time_limit=5)
+    except (AttributeError, AssertionError, OSError, ValueError) as exc:
+        logger.error("No se pudo acceder al micrófono: %s", exc)
+        return None
+    except Exception as exc:
+        logger.error("Error inesperado al abrir el micrófono: %s", exc)
+        return None
+    if audio is None:
+        return None
     try:
         texto = recognizer.recognize_google(audio, language="es-AR")
         logger.info("Escuchado: %s", texto)
@@ -1356,6 +1471,61 @@ def _es_pedido_repeticion(texto: str) -> bool:
     return any(re.search(patron, texto_norm) for patron in patrones)
 
 
+
+
+
+def _detectar_ajuste_redaccion(texto: str) -> bool:
+    if not texto or not _hay_redaccion_en_memoria():
+        return False
+    texto_norm = _sin_acentos(texto.lower())
+    gatillos = [
+        "mas largo",
+        "mas extenso",
+        "mas completo",
+        "mas detallado",
+        "mas formal",
+        "mas informal",
+        "mas amigable",
+        "mas amable",
+        "mas profesional",
+        "mas serio",
+        "mas motivador",
+        "mas entusiasta",
+        "mas cercano",
+        "mas calido",
+        "mas breve",
+        "mas corto",
+        "mas simple",
+        "mas claro",
+        "mas resumido",
+        "menos largo",
+        "menos formal",
+        "menos serio",
+        "menos rigido",
+        "otro mensaje",
+        "otra version",
+        "otro texto",
+    ]
+    if any(frase in texto_norm for frase in gatillos):
+        return True
+    patrones = [
+        r"\b(agrega|agregale|sumale|anadile|anadele|incorporale|incluyele)\b",
+        r"\b(extendelo|amplialo|alargalo|acortalo|reformulalo|reescribilo|cambialo|modificalo|ajustalo|mejoralo)\b",
+        r"\b(extendela|ampliala|alargala|acortala|reformulala|reescribila|cambiala|modificala|ajustala|mejorala)\b",
+        r"\b(hacelo|hazlo|ponelo|dejalo)\s+mas\b",
+        r"\b(hacelo|hazlo|ponelo|dejalo)\s+menos\b",
+        r"\bque\s+el\s+(mensaje|texto)\s+sea\b",
+        r"\b(mensaje|texto|redaccion)\s+nuevo\b",
+    ]
+    if any(re.search(patron, texto_norm) for patron in patrones):
+        return True
+    if texto_norm.startswith("mas ") or texto_norm.startswith("menos "):
+        return True
+    if re.search(r"\b(mensaje|texto|redaccion)\b", texto_norm) and re.search(r"\b(mas|menos|otro|diferente|distinto|igual|formal|informal)\b", texto_norm):
+        return True
+    return False
+
+
 def _repetir_ultima_accion() -> Tuple[bool, str]:
     if not historial_acciones:
         return False, "No recuerdo una acción previa todavía."
@@ -1491,6 +1661,32 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
         threading.Timer(delay, hud.ocultar).start()
         return
 
+    if _detectar_ajuste_redaccion(mensaje):
+        nuevo_texto = generar_redaccion_desde_memoria(mensaje)
+        if nuevo_texto:
+            try:
+                pyautogui.hotkey("ctrl", "a")
+                time.sleep(0.05)
+                pyautogui.press("backspace")
+                time.sleep(0.05)
+                pyautogui.write(nuevo_texto)
+            except Exception as exc:
+                hud.log(f"No pude actualizar el texto: {exc}")
+                texto_acumulado = ""
+                threading.Timer(2, hud.ocultar).start()
+                return
+            registrar_accion({"tipo": "texto", "texto": nuevo_texto})
+            _actualizar_texto_memoria(nuevo_texto)
+            _agregar_instruccion_memoria(mensaje)
+            texto_acumulado = ""
+            logger.info("Texto ajustado a partir de la memoria de redacción.")
+            notificar_y_activar_follow_up("Actualicé el mensaje según tu pedido.")
+            return
+        hud.log("No pude ajustar el mensaje anterior.")
+        texto_acumulado = ""
+        threading.Timer(2, hud.ocultar).start()
+        return
+
     interpretacion = interpretar_intencion_con_cohere(mensaje)
     interpret_tipo = ""
     if interpretacion:
@@ -1522,6 +1718,7 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
                 texto_formateado = _preparar_texto_escribir(contenido)
                 pyautogui.write(texto_formateado)
                 registrar_accion({"tipo": "texto", "texto": texto_formateado})
+                _reiniciar_memoria_redaccion(texto_formateado, mensaje)
                 mensaje_escritura = f"Escribiendo: {texto_formateado}"
                 texto_acumulado = ""
                 notificar_y_activar_follow_up(mensaje_escritura)
@@ -1591,6 +1788,7 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
                 threading.Timer(2, hud.ocultar).start()
                 return
             registrar_accion({"tipo": "texto", "texto": texto_formateado})
+            _reiniciar_memoria_redaccion(texto_formateado, mensaje)
             texto_acumulado = ""
             notificar_y_activar_follow_up(f"Escribiendo: {texto_formateado}")
             return
