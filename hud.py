@@ -2,6 +2,12 @@ import customtkinter as ctk
 from queue import Queue
 import time
 import threading
+from pathlib import Path
+try:
+    import winsound
+except ImportError:
+    winsound = None
+
 from tkinter import Label as TkLabel  # usarlo para medir sin mostrar
 
 
@@ -13,6 +19,18 @@ frame = None
 bubble_label = None
 hud_visible = False
 texto_acumulado = ""
+_SOUND_FILE = Path(__file__).with_name("notify.wav")
+
+def _play_sound(fallback_alias: str) -> None:
+    if winsound is None:
+        return
+    try:
+        if _SOUND_FILE.exists():
+            winsound.PlaySound(str(_SOUND_FILE), winsound.SND_FILENAME | winsound.SND_ASYNC)
+        else:
+            winsound.PlaySound(fallback_alias, winsound.SND_ALIAS | winsound.SND_ASYNC)
+    except Exception:
+        pass
 
 ANCHO = 420
 ALTO_NORMAL = 120
@@ -159,6 +177,7 @@ def mostrar(texto=None, es_expansivo=False, after=None, es_bienvenida=False):
     hud_visible = False
     if root and not hud_visible:
         hud_visible = True
+        _play_sound("SystemNotification")
         texto_acumulado = ""
         root.deiconify()
         root.attributes("-alpha", 0)
@@ -190,6 +209,7 @@ def mostrar(texto=None, es_expansivo=False, after=None, es_bienvenida=False):
 
 
 def ocultar():
+    _play_sound("SystemExit")
     global hud_visible
 
     def fade_out_paso(i=10):

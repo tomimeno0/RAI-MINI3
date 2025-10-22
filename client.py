@@ -52,6 +52,22 @@ historial_acciones: Deque[Dict[str, Any]] = deque(maxlen=5)
 USER32 = ctypes.windll.user32
 KERNEL32 = ctypes.windll.kernel32
 
+follow_up_mode = False
+follow_up_lock = threading.Lock()
+FOLLOW_UP_EXIT_FRASES = {
+    "nada",
+    "nada mas",
+    "nada más",
+    "no",
+    "no gracias",
+    "gracias",
+    "listo",
+    "estoy bien",
+    "eso es todo",
+    "seria todo",
+    "sería todo",
+}
+
 
 def _normalizar(texto: str) -> str:
     return re.sub(r"\s+", " ", texto.strip().lower())
@@ -186,7 +202,109 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
             r"\b(ir\s+a\s+la\s+barra)\b",
         ],
     },
+    {
+        "id": "seleccionar_todo",
+        "descripcion": "Seleccionando todo.",
+        "combos": [("ctrl", "a")],
+        "patrones": [
+            r"\b(selecciona|marca)\s+todo\b",
+            r"\b(seleccionar\s+todo)\b",
+        ],
+    },
+    {
+        "id": "copiar",
+        "descripcion": "Copiando selección.",
+        "combos": [("ctrl", "c")],
+        "patrones": [
+            r"\b(copia|copiame|copialo|copiar)\b",
+        ],
+    },
+    {
+        "id": "pegar",
+        "descripcion": "Pegando.",
+        "combos": [("ctrl", "v")],
+        "patrones": [
+            r"\b(peg(a|á|ame|alo)|pegar)\b",
+            r"\b(pega\s+lo\b)",
+        ],
+    },
+    {
+        "id": "cortar",
+        "descripcion": "Cortando selección.",
+        "combos": [("ctrl", "x")],
+        "patrones": [
+            r"\b(corta|cortame|cortalo|cortar)\b",
+        ],
+    },
+    {
+        "id": "deshacer",
+        "descripcion": "Deshaciendo la última acción.",
+        "combos": [("ctrl", "z")],
+        "patrones": [
+            r"\b(deshac(e|é)|deshacelo|deshacer)\b",
+        ],
+    },
+    {
+        "id": "rehacer",
+        "descripcion": "Rehaciendo la acción.",
+        "combos": [("ctrl", "y"), ("ctrl", "shift", "z")],
+        "patrones": [
+            r"\b(rehac(e|é)|rehacelo|repeti|repetí)\b",
+        ],
+    },
+    {
+        "id": "buscar_en_pantalla",
+        "descripcion": "Buscando en la página.",
+        "combos": [("ctrl", "f")],
+        "patrones": [
+            r"\b(busca|buscar)\s+(en\s+la\s+)?p[áa]gina\b",
+            r"\b(encontr(a|á|ame)|encontrar)\b",
+        ],
+    },
+    {
+        "id": "guardar",
+        "descripcion": "Guardando.",
+        "combos": [("ctrl", "s")],
+        "patrones": [
+            r"\b(guarda|guardar|guardame)\b",
+        ],
+    },
+    {
+        "id": "guardar_como",
+        "descripcion": "Guardando como.",
+        "combos": [("ctrl", "shift", "s")],
+        "patrones": [
+            r"\b(guardar|guardame)\s+como\b",
+        ],
+    },
+    {
+        "id": "imprimir",
+        "descripcion": "Abriendo la impresión.",
+        "combos": [("ctrl", "p")],
+        "patrones": [
+            r"\b(imprim(e|é)|imprimir|impresi[oó]n)\b",
+        ],
+    },
+    {
+        "id": "abrir_archivo",
+        "descripcion": "Abriendo archivo.",
+        "combos": [("ctrl", "o")],
+        "patrones": [
+            r"\b(abr(i|í)|abrime)\s+archivo\b",
+            r"\b(abrir)\s+un\s+archivo\b",
+        ],
+    },
+    {
+        "id": "actualizar_ventana",
+        "descripcion": "Actualizando la ventana.",
+        "combos": [("f5",)],
+        "patrones": [
+            r"\b(actualiza|actualiz[a|á]lo|refresca|recarga)\b",
+        ],
+    },
 ]
+
+ATAJOS_IDS: Dict[str, Dict[str, Any]] = {atajo["id"]: atajo for atajo in ATAJOS_VOZ}
 
 
 def _asegurar_catalogo_unlocked() -> Dict[str, Any]:
@@ -233,6 +351,7 @@ def registrar_accion(accion: Dict[str, Any]) -> None:
         accion_copia["combos"] = combos_guardar
     historial_acciones.append(accion_copia)
     logger.debug("Historial actualizado con: %s", accion_copia)
+
 
 
 def _log_cohere_event(titulo: str, contenido: str) -> None:
@@ -525,6 +644,47 @@ def generar_comandos_con_cohere(
     return {"comandos": comandos_filtrados, "descripcion": descripcion}
 
 
+def generar_respuesta_con_cohere(mensaje: str) -> Optional[str]:
+    cliente = obtener_cliente_cohere()
+    if not cliente:
+        return None
+    instrucciones = (
+        "Eres un asistente conversacional en español rioplatense. "
+        "Responde de forma breve, cordial y útil. Evita mencionar que eres una IA. "
+        "Si no tienes contexto suficiente, muestra empatía y pide aclaraciones."
+    )
+    prompt = f"{instrucciones}\nUsuario: {mensaje.strip()}\nRespuesta:"
+    _log_cohere_event("PROMPT_RESPUESTA", prompt)
+    try:
+        respuesta = cliente.chat(
+            model=COHERE_MODEL,
+            message=prompt,
+            temperature=0.6,
+        )
+    except Exception as exc:
+        logger.error(f"Cohere respuesta falló: {exc}")
+        return None
+
+    texto = ""
+    if hasattr(respuesta, "text") and respuesta.text:
+        texto = respuesta.text.strip()
+    elif hasattr(respuesta, "message"):
+        contenido = getattr(respuesta.message, "content", [])
+        partes: List[str] = []
+        for bloque in contenido or []:
+            if isinstance(bloque, dict) and bloque.get("type") == "text":
+                partes.append(str(bloque.get("text", "")))
+        texto = "".join(partes).strip()
+    elif hasattr(respuesta, "output_text"):
+        texto = (respuesta.output_text or "").strip()
+
+    texto = texto.strip()
+    if not texto:
+        return None
+    _log_cohere_event("RESPUESTA_CONVERSACIONAL", texto)
+    return texto
+
+
 def _buscar_app(catalogo: Dict[str, Any], nombre_app: str) -> Optional[Dict[str, Any]]:
     objetivo = _normalizar(nombre_app)
     for app in catalogo.get("aplicaciones", []):
@@ -648,61 +808,84 @@ def ejecutar_accion_ventana(accion: str, nombre_ventana: str) -> None:
         if ventana:
             if accion == "maximizar":
                 hwnd = getattr(ventana, "_hWnd", None)
-                user32 = ctypes.windll.user32 if hwnd else None
-                if user32 and hwnd:
+                max_exitoso = False
+
+                if hwnd:
                     try:
-                        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                        logger.debug("SW_RESTORE aplicado a %s.", hwnd)
-                        time.sleep(0.15)
+                        USER32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                        USER32.ShowWindow(hwnd, 5)  # SW_SHOW
+                        logger.debug("Restauré la ventana %s mediante ShowWindow.", hwnd)
                     except Exception as exc:
-                        logger.debug("SW_RESTORE falló: %s", exc)
+                        logger.debug("No pude restaurar con ShowWindow: %s", exc)
+
+                    current_thread = KERNEL32.GetCurrentThreadId()
+                    target_thread = USER32.GetWindowThreadProcessId(hwnd, None)
+                    attached = False
+                    if current_thread and target_thread and current_thread != target_thread:
+                        try:
+                            attached = bool(USER32.AttachThreadInput(current_thread, target_thread, True))
+                        except Exception as exc:
+                            logger.debug("AttachThreadInput falló: %s", exc)
+                    try:
+                        try:
+                            USER32.BringWindowToTop(hwnd)
+                        except Exception:
+                            pass
+                        try:
+                            USER32.SetForegroundWindow(hwnd)
+                        except Exception as exc:
+                            logger.debug("SetForegroundWindow falló: %s", exc)
+                        try:
+                            USER32.SwitchToThisWindow(hwnd, True)
+                        except Exception:
+                            pass
+                    finally:
+                        if attached:
+                            try:
+                                USER32.AttachThreadInput(current_thread, target_thread, False)
+                            except Exception:
+                                pass
+
                 try:
                     ventana.restore()
-                except Exception:
-                    pass
-                if user32 and hwnd:
-                    try:
-                        user32.SetForegroundWindow(hwnd)
-                        time.sleep(0.05)
-                    except Exception as exc:
-                        logger.debug("SetForegroundWindow falló: %s", exc)
+                except Exception as exc:
+                    logger.debug("pygetwindow.restore falló: %s", exc)
+
                 try:
                     ventana.activate()
                 except Exception as exc:
-                    logger.debug("Actualizar foco falló: %s", exc)
+                    logger.debug("pygetwindow.activate falló: %s", exc)
 
-                max_exitoso = False
                 try:
                     ventana.maximize()
                     time.sleep(0.05)
-                    if not user32 or (user32 and hwnd and user32.IsZoomed(hwnd)):
+                    if not hwnd or USER32.IsZoomed(hwnd):
                         max_exitoso = True
-                        logger.debug("Maximizacion via pygetwindow confirmada.")
+                        logger.debug("Maximización directa confirmada.")
                 except Exception as exc:
-                    logger.debug("Maximizar directo falló: %s", exc)
+                    logger.debug("pygetwindow.maximize falló: %s", exc)
 
-                if not max_exitoso and user32 and hwnd:
+                if not max_exitoso and hwnd:
                     try:
-                        user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+                        USER32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+                        USER32.PostMessageW(hwnd, 0x0112, 0xF030, 0)  # WM_SYSCOMMAND SC_MAXIMIZE
                         time.sleep(0.05)
-                        if user32.IsZoomed(hwnd):
+                        if USER32.IsZoomed(hwnd):
                             max_exitoso = True
-                            logger.debug("Maximizacion via ShowWindow confirmada.")
+                            logger.debug("Maximización via ShowWindow/PostMessage confirmada.")
                     except Exception as win_exc:
-                        logger.debug("ShowWindow SW_MAXIMIZE falló: %s", win_exc)
+                        logger.debug("Maximización con ShowWindow/PostMessage falló: %s", win_exc)
 
                 if not max_exitoso:
                     try:
-                        ventana.activate()
-                    except Exception:
-                        pass
-                    try:
+                        if hwnd:
+                            USER32.SetForegroundWindow(hwnd)
                         time.sleep(0.1)
                         pyautogui.hotkey("win", "up")
                         time.sleep(0.05)
-                        if user32 and hwnd and user32.IsZoomed(hwnd):
+                        if not hwnd or USER32.IsZoomed(hwnd):
                             max_exitoso = True
-                            logger.debug("Maximizacion via Win+Up confirmada.")
+                            logger.debug("Maximización via Win+Up confirmada.")
                     except Exception as hotkey_exc:
                         logger.debug("Atajo Win+Up falló: %s", hotkey_exc)
 
@@ -963,6 +1146,155 @@ def ejecutar_atajo_teclado(atajo: Dict[str, Any]) -> bool:
     return _ejecutar_combos_teclado(combos)
 
 
+def _obtener_atajo_por_id(atajo_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not atajo_id:
+        return None
+    return ATAJOS_IDS.get(atajo_id)
+
+def _es_frase_fin_seguimiento(texto: str) -> bool:
+    base = _sin_acentos(texto or "").strip()
+    for frase in FOLLOW_UP_EXIT_FRASES:
+        if base == frase:
+            return True
+        if base.startswith(frase + " ") or base.endswith(" " + frase):
+            return True
+    return False
+
+
+def finalizar_follow_up(mensaje: str) -> None:
+    global follow_up_mode, texto_acumulado
+    hud.log(mensaje)
+    texto_acumulado = ""
+    with follow_up_lock:
+        follow_up_mode = False
+    threading.Timer(2, hud.ocultar).start()
+
+
+def iniciar_follow_up(force_start: bool = False) -> None:
+    global follow_up_mode
+    with follow_up_lock:
+        if follow_up_mode:
+            return
+        if not force_start:
+            return
+        follow_up_mode = True
+    threading.Thread(target=_ciclo_follow_up, daemon=True).start()
+
+
+def _ciclo_follow_up() -> None:
+    global follow_up_mode, texto_acumulado
+    while True:
+        texto = escuchar_fragmento()
+        if not texto:
+            continue
+        texto = texto.strip()
+        if not texto:
+            continue
+        if _es_frase_fin_seguimiento(texto):
+            finalizar_follow_up("Listo, cualquier cosa avisame.")
+            break
+        texto_acumulado = texto
+        enviar_mensaje_final()
+        with follow_up_lock:
+            if not follow_up_mode:
+                break
+
+
+def _detectar_texto_a_escribir(texto: str) -> Optional[str]:
+    if not texto:
+        return None
+    patron = re.compile(
+        r"\b(escrib(?:i|í|o|a|ir|ime|eme|ile?s?|les)|escribe(?:le|les)?|escribime|escribeme|escribilo|tipe(?:a|á|ame|alo|ala)|redact(?:a|á|ame|alo|ar|ales))\s+(?P<contenido>.+)",
+        re.IGNORECASE,
+    )
+    match = patron.search(texto.strip())
+    if not match:
+        return None
+    contenido = match.group("contenido").strip()
+    if not contenido:
+        return None
+    quote_chars = {'"', "'", "“", "”", "«", "»"}
+    if contenido[0] in quote_chars and contenido[-1:] == contenido[0]:
+        contenido = contenido[1:-1].strip()
+    return contenido
+
+
+def _preparar_texto_escribir(contenido: str) -> str:
+    base = contenido.strip()
+    if not base:
+        return base
+    patron_mensaje = re.compile(
+        r"^un mensaje a (?P<dest>.+?) (?:para que|para|pidi(?:é|e)ndoles que|pidi(?:é|e)ndole que|dici(?:é|e)ndoles que|dici(?:é|e)ndole que|que)\s+(?P<body>.+)",
+        re.IGNORECASE,
+    )
+    match = patron_mensaje.match(base)
+    if match:
+        dest = match.group("dest").strip()
+        body = match.group("body").strip()
+        dest_formateado = dest.capitalize() if dest else "todos"
+        if body:
+            body_limpio = body.strip()
+            if not body_limpio.endswith((".", "!", "?")):
+                body_limpio = body_limpio.rstrip(".") + "."
+            cuerpo = body_limpio[0].upper() + body_limpio[1:]
+        else:
+            cuerpo = ""
+        if cuerpo:
+            return f"Hola {dest_formateado}, {cuerpo}"
+        return f"Hola {dest_formateado}, ¿todo bien?"
+    if not base.endswith((".", "!", "?")):
+        base = base + "."
+    return base
+
+
+def interpretar_intencion_con_cohere(mensaje: str) -> Optional[Dict[str, Any]]:
+    cliente = obtener_cliente_cohere()
+    if not cliente:
+        return None
+    instrucciones = (
+        "Eres Cogere, analista de órdenes. Clasifica la solicitud del usuario.\n"
+        "Responde únicamente con JSON. Campos obligatorios:\n"
+        "- tipo: uno de [escribir_texto, abrir_app, cerrar_app, atajo, comandos, respuesta, ninguno]\n"
+        "- razon: explicación breve.\n"
+        "Campos adicionales:\n"
+        "* escribir_texto: agrega \"contenido\" (texto listo para escribir).\n"
+        "* abrir_app / cerrar_app: agrega \"objetivo\" (nombre de la app o alias encontrado).\n"
+        "* atajo: agrega \"atajo_id\" usando uno de estos IDs: "
+        + ", ".join(sorted(ATAJOS_IDS.keys()))
+        + ".\n"
+        "* comandos: opcionalmente \"contexto\" o \"nota\" para guiar la generación de comandos.\n"
+        "* respuesta: agrega \"texto\" con la respuesta natural en español.\n"
+        "Si no procede ninguna acción, responde tipo=ninguno.\n"
+        "No agregues texto fuera del JSON."
+    )
+    prompt = f"{instrucciones}\nOrden del usuario: \"{mensaje.strip()}\""
+    try:
+        respuesta = cliente.chat(
+            model=COHERE_MODEL,
+            message=prompt,
+            temperature=0.1,
+        )
+        texto = ""
+        if hasattr(respuesta, "text") and respuesta.text:
+            texto = respuesta.text.strip()
+        elif hasattr(respuesta, "message"):
+            contenido = getattr(respuesta.message, "content", [])
+            partes: List[str] = []
+            for bloque in contenido or []:
+                if isinstance(bloque, dict) and bloque.get("type") == "text":
+                    partes.append(str(bloque.get("text", "")))
+            texto = "".join(partes).strip()
+        elif hasattr(respuesta, "output_text"):
+            texto = (respuesta.output_text or "").strip()
+        datos = _extraer_json(texto)
+        if not datos:
+            logger.debug("Interpretación Cohere inválida: %s", texto)
+            return None
+        return datos
+    except Exception as exc:
+        logger.error(f"Cohere interpretador falló: {exc}")
+        return None
+
 
 def _detectar_intencion_catalogo(texto: str) -> Optional[tuple[str, str]]:
     texto_base = texto or ""
@@ -1040,6 +1372,23 @@ def _repetir_ultima_accion() -> Tuple[bool, str]:
             registrar_accion({"tipo": "atajo", "combos": combos_tuplas, "descripcion": descripcion})
             return True, descripcion
         return False, "El atajo anterior falló al repetirse."
+    if tipo == "texto":
+        contenido = ultima.get("texto")
+        if not contenido:
+            return False, "No tengo qué escribir."
+        try:
+            pyautogui.write(contenido)
+            registrar_accion({"tipo": "texto", "texto": contenido})
+            return True, f"Volví a escribir: {contenido}"
+        except Exception as exc:
+            return False, f"No pude escribir otra vez: {exc}"
+    if tipo == "respuesta":
+        contenido = ultima.get("texto") or ultima.get("respuesta") or ""
+        if not contenido:
+            return False, "No tengo qué responder."
+        hud.log(contenido)
+        registrar_accion({"tipo": "respuesta", "texto": contenido})
+        return True, contenido
     if tipo == "comandos":
         comandos = ultima.get("comandos")
         if not comandos:
@@ -1112,7 +1461,7 @@ def comando_abrir_desde_app(app: Dict[str, Any]) -> Optional[str]:
 
 
 def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por compatibilidad
-    del timeout  # no se usa sin servidor
+    del timeout
     global texto_acumulado
     if not texto_acumulado:
         logger.warning("No hay texto para enviar.")
@@ -1121,25 +1470,123 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
     mensaje = texto_acumulado.strip()
     if _es_pedido_repeticion(mensaje):
         ok, mensaje_historial = _repetir_ultima_accion()
-        if ok:
-            hud.log(mensaje_historial)
-        else:
-            hud.log(mensaje_historial)
+        hud.log(mensaje_historial)
+        delay = 6 if historial_acciones and historial_acciones[-1].get("tipo") == "respuesta" else 2
         texto_acumulado = ""
-        threading.Timer(2, hud.ocultar).start()
+        threading.Timer(delay, hud.ocultar).start()
         return
 
-    atajo = _detectar_atajo_teclado(mensaje)
-    if atajo:
-        logger.info("Atajo de teclado detectado: %s", atajo.get('id'))
-        if ejecutar_atajo_teclado(atajo):
-            registrar_accion({"tipo": "atajo", "combos": [tuple(c) for c in atajo.get("combos", [])], "descripcion": atajo.get("descripcion")})
-            hud.log(atajo.get("descripcion") or "Atajo ejecutado.")
-        else:
-            hud.log("No pude ejecutar el atajo.")
+    interpretacion = interpretar_intencion_con_cohere(mensaje)
+    interpret_tipo = ""
+    if interpretacion:
+        interpret_tipo = str(interpretacion.get("tipo") or "").lower()
+        logger.info(
+            "Interpretación Cohere: tipo=%s razon=%s",
+            interpret_tipo or "desconocido",
+            interpretacion.get("razon"),
+        )
+
+    contexto_app: Optional[Dict[str, Any]] = None
+    catalogo_ref: Optional[Dict[str, Any]] = None
+    accion_objetivo: Optional[str] = None
+    nombre_objetivo: Optional[str] = None
+
+    if interpret_tipo == "respuesta":
+        texto_respuesta = str((interpretacion.get("texto") if interpretacion else "") or "").strip()
+        if not texto_respuesta:
+            texto_respuesta = generar_respuesta_con_cohere(mensaje) or "Perdón, ¿podrías repetirme?"
+        mensaje_combo = f"{texto_respuesta}\n¿Necesitás algo más?"
+        hud.log(mensaje_combo)
+        registrar_accion({"tipo": "respuesta", "texto": texto_respuesta})
         texto_acumulado = ""
-        threading.Timer(2, hud.ocultar).start()
+        iniciar_follow_up(force_start=True)
         return
+
+    if interpret_tipo == "escribir_texto":
+        contenido = str((interpretacion.get("contenido") if interpretacion else "") or "").strip()
+        if contenido:
+            try:
+                texto_formateado = _preparar_texto_escribir(contenido)
+                pyautogui.write(texto_formateado)
+                registrar_accion({"tipo": "texto", "texto": texto_formateado})
+                mensaje_escritura = f"Escribiendo: {texto_formateado}"
+                if follow_up_mode:
+                    hud.log(f"{mensaje_escritura}\n¿Necesitás algo más?")
+                else:
+                    hud.log(mensaje_escritura)
+            except Exception as exc:
+                hud.log(f"No pude escribir: {exc}")
+        else:
+            hud.log("Cohere no envió contenido para escribir.")
+        texto_acumulado = ""
+        if follow_up_mode:
+            iniciar_follow_up()
+        else:
+            threading.Timer(2, hud.ocultar).start()
+        return
+
+    if interpret_tipo == "atajo":
+        atajo_interpretado = _obtener_atajo_por_id((interpretacion or {}).get("atajo_id"))
+        if atajo_interpretado and ejecutar_atajo_teclado(atajo_interpretado):
+            descripcion_atajo = atajo_interpretado.get("descripcion") or "Atajo ejecutado."
+            registrar_accion({
+                "tipo": "atajo",
+                "combos": atajo_interpretado.get("combos", []),
+                "descripcion": descripcion_atajo,
+            })
+            texto_acumulado = ""
+            if follow_up_mode:
+                hud.log(f"{descripcion_atajo}\n¿Necesitás algo más?")
+                iniciar_follow_up()
+            else:
+                hud.log(descripcion_atajo)
+                threading.Timer(2, hud.ocultar).start()
+            return
+        if interpretacion:
+            logger.warning(
+                "Atajo indicado por Cohere no reconocido: %s",
+                interpretacion.get("atajo_id"),
+            )
+
+    if interpret_tipo in {"abrir_app", "cerrar_app"}:
+        accion_objetivo = "abrir" if interpret_tipo == "abrir_app" else "cerrar"
+        nombre_objetivo = str((interpretacion or {}).get("objetivo") or "").strip()
+        if nombre_objetivo:
+            catalogo_ref = cargar_catalogo()
+            contexto_app = _buscar_app(catalogo_ref, nombre_objetivo)
+
+    mensaje_para_cohere = mensaje
+    if interpret_tipo == "comandos" and interpretacion:
+        nota = (interpretacion.get("contexto") or interpretacion.get("nota") or "").strip()
+        if nota:
+            mensaje_para_cohere = f"{mensaje}\nNota: {nota}"
+
+    if interpret_tipo != "atajo":
+        atajo = _detectar_atajo_teclado(mensaje)
+        if atajo:
+            logger.info("Atajo de teclado detectado: %s", atajo.get("id"))
+            if ejecutar_atajo_teclado(atajo):
+                registrar_accion({"tipo": "atajo", "combos": atajo.get("combos", []), "descripcion": atajo.get("descripcion")})
+                hud.log(atajo.get("descripcion") or "Atajo ejecutado.")
+            else:
+                hud.log("No pude ejecutar el atajo.")
+            texto_acumulado = ""
+            threading.Timer(2, hud.ocultar).start()
+            return
+
+    if interpret_tipo != "escribir_texto":
+        texto_a_escribir = _detectar_texto_a_escribir(mensaje)
+        if texto_a_escribir:
+            try:
+                texto_formateado = _preparar_texto_escribir(texto_a_escribir)
+                pyautogui.write(texto_formateado)
+                registrar_accion({"tipo": "texto", "texto": texto_formateado})
+                hud.log(f"Escribiendo: {texto_formateado}")
+            except Exception as exc:
+                hud.log(f"No pude escribir: {exc}")
+            texto_acumulado = ""
+            threading.Timer(2, hud.ocultar).start()
+            return
 
     accion_ventana = _detectar_accion_ventana(mensaje)
     if accion_ventana:
@@ -1161,22 +1608,18 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
         threading.Timer(2, hud.ocultar).start()
         return
 
-    logger.info("Consultando Cohere para la orden: %s", mensaje)
+    if not nombre_objetivo:
+        intencion = _detectar_intencion_catalogo(mensaje)
+        if intencion:
+            accion_objetivo, nombre_objetivo = intencion
+            catalogo_ref = cargar_catalogo()
+            if nombre_objetivo:
+                contexto_app = _buscar_app(catalogo_ref, nombre_objetivo)
 
-    contexto_app = None
-    catalogo_ref: Optional[Dict[str, Any]] = None
-    accion_objetivo: Optional[str] = None
-    nombre_objetivo: Optional[str] = None
-
-    intencion = _detectar_intencion_catalogo(mensaje)
-    if intencion:
-        accion_objetivo, nombre_objetivo = intencion
-        catalogo_ref = cargar_catalogo()
-        if nombre_objetivo:
-            contexto_app = _buscar_app(catalogo_ref, nombre_objetivo)
+    logger.info("Consultando Cohere para la orden: %s", mensaje_para_cohere)
 
     sugerencia = generar_comandos_con_cohere(
-        mensaje,
+        mensaje_para_cohere,
         contexto_app=contexto_app,
         catalogo_actual=catalogo_ref,
     )
@@ -1197,11 +1640,16 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
             return
         logger.warning("Los comandos sugeridos por Cohere fallaron: %s", comandos_generados)
 
-    hud.log("No pude interpretar la orden.")
+    respuesta_conversacional = generar_respuesta_con_cohere(mensaje)
+    if respuesta_conversacional:
+        hud.log(respuesta_conversacional)
+        registrar_accion({"tipo": "respuesta", "texto": respuesta_conversacional})
+        delay = 6
+    else:
+        hud.log("No pude interpretar la orden.")
+        delay = 2
     texto_acumulado = ""
-    threading.Timer(2, hud.ocultar).start()
-
-
+    threading.Timer(delay, hud.ocultar).start()
 def enviar_mensaje_final_automatico() -> None:
     timeout = 60 if es_pregunta_larga(texto_acumulado) else 5
     enviar_mensaje_final(timeout=timeout)
