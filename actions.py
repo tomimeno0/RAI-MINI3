@@ -367,16 +367,47 @@ def _close_app(target: Optional[str]) -> Tuple[bool, str]:
     if not app:
         return False, "Aplicación no reconocida"
 
-    action_error: Optional[str] = None
-    action_commands = _select_action_commands(app, ("cerrar", "close", "terminate", "detener", "stop", "salir"))
-    if action_commands:
-        ok, message = _run_commands(action_commands, wait=True)
-        if ok:
-            return True, message or f"Cerré {app['id']}"
-        action_error = message or "No pude ejecutar el comando registrado"
-
     exe = app.get("exe_name")
+    process_name = os.path.splitext(os.path.basename(exe))[0] if exe else None
+    stop_process_message: Optional[str] = None
     taskkill_message: Optional[str] = None
+
+    if process_name:
+        try:
+            ps_result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoLogo",
+                    "-NonInteractive",
+                    "-Command",
+                    f'Stop-Process -Name "{process_name}" -Force',
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if ps_result.returncode == 0:
+                return True, f"Cerró {app['id']}"
+            raw_stdout = ps_result.stdout or ""
+            raw_stderr = ps_result.stderr or ""
+            stdout = raw_stdout.lower()
+            stderr = raw_stderr.lower()
+            if (
+                "cannot find a process" in stdout
+                or "cannot find a process" in stderr
+                or "no se encuentra" in stdout
+                or "no se encuentra" in stderr
+            ):
+                stop_process_message = "La aplicación no está en ejecución"
+            else:
+                stop_process_message = (
+                    raw_stdout.strip()
+                    or raw_stderr.strip()
+                    or "No se pudo cerrar"
+                )
+        except Exception as exc:
+            stop_process_message = f"Error al cerrar con PowerShell: {exc}"
+
     if exe:
         try:
             result = subprocess.run(
@@ -386,14 +417,16 @@ def _close_app(target: Optional[str]) -> Tuple[bool, str]:
                 check=False,
             )
             if result.returncode == 0:
-                return True, f"Cerré {app['id']}"
-            stdout = (result.stdout or "").lower()
+                return True, f"Cerró {app['id']}"
+            raw_stdout = result.stdout or ""
+            raw_stderr = result.stderr or ""
+            stdout = raw_stdout.lower()
             if "no se encuentra" in stdout or "not found" in stdout:
                 taskkill_message = "La aplicación no está en ejecución"
             else:
                 taskkill_message = (
-                    result.stdout.strip()
-                    or result.stderr.strip()
+                    raw_stdout.strip()
+                    or raw_stderr.strip()
                     or "No se pudo cerrar"
                 )
         except Exception as exc:
@@ -404,8 +437,13 @@ def _close_app(target: Optional[str]) -> Tuple[bool, str]:
         return True, window_message
 
     if exe:
-        return False, taskkill_message or action_error or window_message or "No se pudo cerrar"
-    return False, action_error or window_message or "Necesito pygetwindow para cerrar esta aplicación"
+        return False, (
+            stop_process_message
+            or taskkill_message
+            or window_message
+            or "No se pudo cerrar"
+        )
+    return False, window_message or "Necesito pygetwindow para cerrar esta aplicación"
 
 
 def _close_by_window(app: Dict[str, Any]) -> Tuple[bool, str]:

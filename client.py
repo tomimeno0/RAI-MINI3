@@ -7,6 +7,7 @@ para generar comandos de PowerShell/teclado/ventanas y los persiste.
 
 from __future__ import annotations
 
+import ctypes
 import datetime
 import json
 import logging
@@ -17,8 +18,9 @@ import subprocess
 import threading
 import time
 import unicodedata
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import keyboard  # type: ignore
 import psutil
@@ -46,6 +48,9 @@ _catalogo_cache: Optional[Dict[str, Any]] = None
 COHERE_MODEL = os.getenv("COHERE_MODEL", "command-r-plus-08-2024")
 COHERE_API_KEY = "ppBVjJhTQ1vCU7WVBKt1wYKpDUZW97LhZ1PrHsBJ"
 _cohere_client: Optional["cohere.Client"] = None
+historial_acciones: Deque[Dict[str, Any]] = deque(maxlen=5)
+USER32 = ctypes.windll.user32
+KERNEL32 = ctypes.windll.kernel32
 
 
 def _normalizar(texto: str) -> str:
@@ -57,6 +62,131 @@ def _sin_acentos(texto: str) -> str:
     texto_lower = texto.lower()
     descompuesto = unicodedata.normalize("NFD", texto_lower)
     return "".join(ch for ch in descompuesto if not unicodedata.combining(ch))
+
+
+ATAJOS_VOZ: List[Dict[str, Any]] = [
+    {
+        "id": "mostrar_escritorio",
+        "descripcion": "Mostrando el escritorio.",
+        "combos": [("winleft", "d")],
+        "patrones": [
+            r"\b(mostrar|mostrame|mostrarme|muestrame|muestreme)\s+(el\s+)?escritorio\b",
+            r"\b(minimiza(?:r|me)?|oculta(?:r|me)?|esconde)\s+(todo|todas\s+las\s+ventanas)\b",
+        ],
+    },
+    {
+        "id": "restaurar_ventanas",
+        "descripcion": "Restaurando las ventanas.",
+        "combos": [("winleft", "shift", "m")],
+        "patrones": [
+            r"\b(restaura(?:r|me)?|recupera|mostra)\s+(las\s+)?ventanas\b",
+        ],
+    },
+    {
+        "id": "cerrar_ventana",
+        "descripcion": "Cerrando la ventana actual.",
+        "combos": [("alt", "f4")],
+        "patrones": [
+            r"\b(cierra|cerrame|cerrar)\s+(la\s+)?ventana\b",
+            r"\b(salir\s+de|cerrar)\s+(esta\s+)?aplicacion\b",
+        ],
+    },
+    {
+        "id": "cerrar_pestana",
+        "descripcion": "Cerrando la pestaña.",
+        "combos": [("ctrl", "w")],
+        "patrones": [
+            r"\b(cierra|cerrame|cerrar)\s+(la\s+)?pestana\b",
+            r"\b(cerrar)\s+(esta\s+)?pestana\b",
+        ],
+    },
+    {
+        "id": "nueva_pestana",
+        "descripcion": "Abriendo una nueva pestaña.",
+        "combos": [("ctrl", "t")],
+        "patrones": [
+            r"\b(nueva|abrir)\s+(pestana|pestania)\b",
+        ],
+    },
+    {
+        "id": "reabrir_pestana",
+        "descripcion": "Reabriendo la última pestaña.",
+        "combos": [("ctrl", "shift", "t")],
+        "patrones": [
+            r"\b(reabrir|recupera|volver a abrir)\s+(la\s+)?(ultima|última)\s+pestana\b",
+        ],
+    },
+    {
+        "id": "nueva_ventana",
+        "descripcion": "Abriendo una nueva ventana.",
+        "combos": [("ctrl", "n")],
+        "patrones": [
+            r"\b(nueva|abrir)\s+ventana\b",
+        ],
+    },
+    {
+        "id": "ventana_incognita",
+        "descripcion": "Abriendo una ventana de incógnito.",
+        "combos": [("ctrl", "shift", "n")],
+        "patrones": [
+            r"\b(incognito|incognita|privada)\b",
+        ],
+    },
+    {
+        "id": "mostrar_explorador",
+        "descripcion": "Abriendo el Explorador de archivos.",
+        "combos": [("winleft", "e")],
+        "patrones": [
+            r"\b(abrir|abre)\s+(el\s+)?explorador\b",
+            r"\b(abrir|abre)\s+(mis\s+)?archivos\b",
+        ],
+    },
+    {
+        "id": "bloquear_equipo",
+        "descripcion": "Bloqueando el equipo.",
+        "combos": [("winleft", "l")],
+        "patrones": [
+            r"\b(bloquea|bloquear|bloqueame)\s+(el\s+)?equipo\b",
+            r"\b(bloquea|bloquear)\s+(la\s+)?pantalla\b",
+        ],
+    },
+    {
+        "id": "captura_pantalla",
+        "descripcion": "Capturando pantalla.",
+        "combos": [("winleft", "shift", "s")],
+        "patrones": [
+            r"\b(captura|capturar|sacar)\s+(de\s+)?pantalla\b",
+            r"\b(screenshot|recorte)\b",
+        ],
+    },
+    {
+        "id": "grabar_pantalla",
+        "descripcion": "Alternando grabación de pantalla.",
+        "combos": [("winleft", "alt", "r")],
+        "patrones": [
+            r"\b(grabar|graba|grabame)\s+(la\s+)?pantalla\b",
+            r"\b(termina|detener)\s+(la\s+)?grabacion\b",
+        ],
+    },
+    {
+        "id": "mostrar_busqueda",
+        "descripcion": "Abriendo la búsqueda.",
+        "combos": [("winleft", "s")],
+        "patrones": [
+            r"\b(abrir|abre)\s+(la\s+)?busqueda\b",
+            r"\b(buscar|buscame)\b",
+        ],
+    },
+    {
+        "id": "seleccionar_omnibox",
+        "descripcion": "Resaltando la barra de direcciones.",
+        "combos": [("ctrl", "l")],
+        "patrones": [
+            r"\b(selecciona|marca|resalta)\s+(la\s+)?barra\b",
+            r"\b(ir\s+a\s+la\s+barra)\b",
+        ],
+    },
+]
 
 
 def _asegurar_catalogo_unlocked() -> Dict[str, Any]:
@@ -89,6 +219,20 @@ def _guardar_catalogo_unlocked(catalogo: Dict[str, Any]) -> None:
                 tmp_path.unlink()
             except OSError:
                 pass
+
+
+def registrar_accion(accion: Dict[str, Any]) -> None:
+    accion_copia = dict(accion)
+    if "combos" in accion_copia:
+        combos_guardar: List[List[str]] = []
+        for combo in accion_copia["combos"] or []:
+            if isinstance(combo, (list, tuple)):
+                combos_guardar.append([str(k) for k in combo])
+            else:
+                combos_guardar.append([str(combo)])
+        accion_copia["combos"] = combos_guardar
+    historial_acciones.append(accion_copia)
+    logger.debug("Historial actualizado con: %s", accion_copia)
 
 
 def _log_cohere_event(titulo: str, contenido: str) -> None:
@@ -134,14 +278,7 @@ def obtener_cliente_cohere() -> Optional["cohere.Client"]:
 
 
 def _componer_contexto_catalogo(catalogo: Dict[str, Any], app_obj: Optional[Dict[str, Any]] = None) -> str:
-    nombres: List[str] = []
-    for app in catalogo.get("aplicaciones", []):
-        nombre = str(app.get("nombre") or app.get("id") or "").strip()
-        if nombre:
-            nombres.append(nombre)
-        if len(nombres) >= 40:
-            break
-    bloques = [", ".join(nombres) if nombres else "(sin catálogo cargado)"]
+    bloques: List[str] = []
     if app_obj:
         detalles = {
             "nombre": app_obj.get("nombre"),
@@ -150,6 +287,8 @@ def _componer_contexto_catalogo(catalogo: Dict[str, Any], app_obj: Optional[Dict
             "acciones": list((app_obj.get("acciones") or {}).keys()),
         }
         bloques.append(json.dumps(detalles, ensure_ascii=False))
+    else:
+        bloques.append("(catálogo deshabilitado)")
     return "\n".join(bloques)
 
 
@@ -304,22 +443,14 @@ def generar_comandos_con_cohere(
     contexto_catalogo = _componer_contexto_catalogo(catalogo, contexto_app)
     instrucciones = (
         "Eres un asistente que genera comandos exactos para Windows.\n"
-        "Dispones de un catalogo JSON con aplicaciones instaladas. Cada entrada contiene: \n"
-        "- nombre/id\n"
-        '- tipo: "exe" o "uwp"\n'
-        "- launch: ruta o comando EXACTO para abrir la app\n"
-        "- paths: rutas de instalacion\n"
-        "- acciones: comandos conocidos (abrir, cerrar, etc.)\n"
-        "Al generar comandos: \n"
-        "1. Usa siempre la ruta de launch/paths cuando exista.\n"
-        '   - Si lanzas un .exe, responde con start "" \"RUTA\" o directamente "RUTA".\n'
-        "2. No inventes rutas ni dependas de start appname generico.\n"
-        "3. Para apps UWP DEBES devolver exactamente explorer.exe shell:appsFolder\\<AppUserModelID> (incluye la barra invertida).\n"
-        "4. Si necesitas varias acciones, respeta el orden de ejecucion.\n"
-        "5. Responde unicamente con el comando ejecutable en texto plano; sin JSON ni explicaciones.\n"
-        "   - Si envias varios comandos, escribe uno por linea en el orden correcto.\n"
-        "6. Corrige errores tipograficos leves apoyandote en el catalogo antes de rendirte.\n"
-        "7. Nunca respondas NINGUNO si existe una coincidencia cercana en el catalogo.\n"
+        "Ignora comandos pregrabados en catalogos y genera siempre instrucciones directas.\n"
+        "Si el usuario pide cerrar o terminar una aplicacion, responde solamente con Stop-Process -Name \"NOMBRE\" -Force.\n"
+        "Reemplaza NOMBRE por el nombre del proceso sin la extension .exe.\n"
+        "Si necesitas abrir un .exe existente, responde con start \"\" \"RUTA\" o con la ruta exacta.\n"
+        "Para apps UWP responde exactamente explorer.exe shell:appsFolder\\<AppUserModelID>.\n"
+        "Evita comandos genericos o rutas inventadas.\n"
+        "Si la orden requiere varias acciones, escribe un comando por linea en el orden correcto.\n"
+        "Responde unicamente con comandos ejecutables en texto plano.\n"
         "Si no puedes ayudar, responde exactamente NINGUNO."
     )
     prompt = (
@@ -430,63 +561,6 @@ def buscar_comando_por_nombre(nombre_app: str) -> Optional[tuple[str, str, str]]
     return nombre, comando, tipo
 
 
-def ejecutar_accion_desde_catalogo(nombre_app: str, tipo_accion: str) -> bool:
-    tipo_objetivo = tipo_accion.lower()
-    catalogo = cargar_catalogo()
-    app = _buscar_app(catalogo, nombre_app)
-    if not app:
-        logger.warning(f"No encontré la app '{nombre_app}' en el catálogo.")
-        return False
-
-    acciones = app.get("acciones") or {}
-    if not isinstance(acciones, dict):
-        acciones = {}
-    comando = acciones.get(tipo_objetivo)
-    descripcion_generada = ""
-
-    if not comando:
-        logger.info(f"No hay acción '{tipo_accion}' para '{nombre_app}'. Consulto a Cohere.")
-        generado = generar_comandos_con_cohere(
-            f"{tipo_objetivo} {nombre_app}",
-            contexto_app=app,
-            catalogo_actual=catalogo,
-        )
-        if not generado:
-            logger.warning(f"No pude obtener un comando para '{tipo_accion}' de '{nombre_app}'.")
-            return False
-        comando = generado["comandos"][0]
-        descripcion_generada = generado.get("descripcion", "")
-        with catalogo_lock:
-            catalogo_ref = _asegurar_catalogo_unlocked()
-            app_ref = _buscar_app(catalogo_ref, nombre_app)
-            if app_ref is not None:
-                acciones_ref = app_ref.setdefault("acciones", {})  # type: ignore[assignment]
-                if isinstance(acciones_ref, dict):
-                    acciones_ref[tipo_objetivo] = comando
-                    _guardar_catalogo_unlocked(catalogo_ref)
-
-    if descripcion_generada:
-        hud.log(descripcion_generada)
-    if ejecutar_comando_cmd(comando):
-        logger.info(f"Acción '{tipo_accion}' ejecutada sobre '{nombre_app}'.")
-        return True
-
-    logger.warning(f"Falló el comando de '{tipo_accion}' sobre '{nombre_app}'.")
-    return False
-
-
-def actualizar_ultima_vez(nombre_app: str) -> None:
-    marca_temporal = datetime.datetime.now().isoformat(timespec="seconds")
-    with catalogo_lock:
-        catalogo = _asegurar_catalogo_unlocked()
-        app = _buscar_app(catalogo, nombre_app)
-        if not app:
-            logger.debug(f"Catálogo sin coincidencia para '{nombre_app}'.")
-            return
-        app["ultima_vez"] = marca_temporal
-        _guardar_catalogo_unlocked(catalogo)
-
-
 def escaner_inteligente(tipo: str) -> None:
     try:
         if tipo == "ram":
@@ -547,14 +621,97 @@ def escaner_inteligente(tipo: str) -> None:
 
 def ejecutar_accion_ventana(accion: str, nombre_ventana: str) -> None:
     try:
-        ventana = next((w for w in gw.getWindowsWithTitle(nombre_ventana)), None)
+        objetivo_norm = _sin_acentos(nombre_ventana.lower().strip())
+        ventana = None
+        try:
+            posibles = gw.getWindowsWithTitle(nombre_ventana)
+        except Exception:
+            posibles = []
+        for candidato in posibles:
+            titulo = (getattr(candidato, "title", "") or "").strip()
+            if not titulo:
+                continue
+            if objetivo_norm in _sin_acentos(titulo.lower()):
+                ventana = candidato
+                break
+        if ventana is None:
+            try:
+                for candidato in gw.getAllWindows():
+                    titulo = (getattr(candidato, "title", "") or "").strip()
+                    if not titulo:
+                        continue
+                    if objetivo_norm in _sin_acentos(titulo.lower()):
+                        ventana = candidato
+                        break
+            except Exception:
+                ventana = None
         if ventana:
             if accion == "maximizar":
-                ventana.maximize()
-            elif accion == "minimizar":
-                ventana.minimize()
-            elif accion == "enfocar":
-                ventana.activate()
+                hwnd = getattr(ventana, "_hWnd", None)
+                user32 = ctypes.windll.user32 if hwnd else None
+                if user32 and hwnd:
+                    try:
+                        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                        logger.debug("SW_RESTORE aplicado a %s.", hwnd)
+                        time.sleep(0.15)
+                    except Exception as exc:
+                        logger.debug("SW_RESTORE falló: %s", exc)
+                try:
+                    ventana.restore()
+                except Exception:
+                    pass
+                if user32 and hwnd:
+                    try:
+                        user32.SetForegroundWindow(hwnd)
+                        time.sleep(0.05)
+                    except Exception as exc:
+                        logger.debug("SetForegroundWindow falló: %s", exc)
+                try:
+                    ventana.activate()
+                except Exception as exc:
+                    logger.debug("Actualizar foco falló: %s", exc)
+
+                max_exitoso = False
+                try:
+                    ventana.maximize()
+                    time.sleep(0.05)
+                    if not user32 or (user32 and hwnd and user32.IsZoomed(hwnd)):
+                        max_exitoso = True
+                        logger.debug("Maximizacion via pygetwindow confirmada.")
+                except Exception as exc:
+                    logger.debug("Maximizar directo falló: %s", exc)
+
+                if not max_exitoso and user32 and hwnd:
+                    try:
+                        user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+                        time.sleep(0.05)
+                        if user32.IsZoomed(hwnd):
+                            max_exitoso = True
+                            logger.debug("Maximizacion via ShowWindow confirmada.")
+                    except Exception as win_exc:
+                        logger.debug("ShowWindow SW_MAXIMIZE falló: %s", win_exc)
+
+                if not max_exitoso:
+                    try:
+                        ventana.activate()
+                    except Exception:
+                        pass
+                    try:
+                        time.sleep(0.1)
+                        pyautogui.hotkey("win", "up")
+                        time.sleep(0.05)
+                        if user32 and hwnd and user32.IsZoomed(hwnd):
+                            max_exitoso = True
+                            logger.debug("Maximizacion via Win+Up confirmada.")
+                    except Exception as hotkey_exc:
+                        logger.debug("Atajo Win+Up falló: %s", hotkey_exc)
+
+                if not max_exitoso:
+                    raise RuntimeError("No pude maximizar la ventana, incluso con los métodos alternativos.")
+                elif accion == "minimizar":
+                    ventana.minimize()
+                elif accion == "enfocar":
+                    ventana.activate()
             logger.info("Acción '%s' ejecutada sobre '%s'.", accion, nombre_ventana)
         else:
             raise ValueError("ventana_no_encontrada")
@@ -723,6 +880,21 @@ def ejecutar_comando_cmd(comando: str) -> bool:
             escaner_inteligente(comando)
             return True
 
+        if comando.strip().lower().startswith("stop-process"):
+            ps_cmd = comando.strip()
+            resultado = subprocess.run(
+                ["powershell", "-NoLogo", "-NonInteractive", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+            )
+            if resultado.returncode == 0:
+                logger.info("Comando ejecutado con éxito (PowerShell).")
+                if resultado.stdout.strip():
+                    logger.info(resultado.stdout)
+                return True
+            logger.error("Error en comando PowerShell: %s", resultado.stderr)
+            return False
+
         resultado = subprocess.run(comando, shell=True, capture_output=True, text=True)
         if resultado.returncode == 0:
             logger.info("Comando ejecutado con éxito.")
@@ -751,6 +923,45 @@ def es_pregunta_larga(texto: str) -> bool:
     palabras_largas = ["buscar", "explicar", "describir", "resumir", "qué es", "cómo", "quién", "dónde", "por qué"]
     texto_lower = texto.lower()
     return any(p in texto_lower for p in palabras_largas)
+
+def _ejecutar_combos_teclado(combos: List[Tuple[str, ...]]) -> bool:
+    if not combos:
+        return False
+    try:
+        for combo in combos:
+            teclas = tuple(combo)
+            if not teclas:
+                continue
+            logger.debug("Lanzando atajo: %s", "+".join(teclas))
+            pyautogui.hotkey(*teclas)
+            time.sleep(0.05)
+        return True
+    except Exception as exc:
+        logger.error("Error ejecutando atajo de teclado: %s", exc)
+        return False
+
+
+def _detectar_atajo_teclado(texto: str) -> Optional[Dict[str, Any]]:
+    if not texto:
+        return None
+    texto_norm = _sin_acentos(texto.lower())
+    for atajo in ATAJOS_VOZ:
+        for patron in atajo.get("patrones", []):
+            if re.search(patron, texto_norm):
+                return atajo
+    return None
+
+
+def ejecutar_atajo_teclado(atajo: Dict[str, Any]) -> bool:
+    combos_raw = atajo.get("combos") or []
+    combos: List[Tuple[str, ...]] = []
+    for combo in combos_raw:
+        if isinstance(combo, (list, tuple)):
+            combos.append(tuple(str(k) for k in combo))
+        else:
+            combos.append((str(combo),))
+    return _ejecutar_combos_teclado(combos)
+
 
 
 def _detectar_intencion_catalogo(texto: str) -> Optional[tuple[str, str]]:
@@ -785,6 +996,106 @@ def _detectar_intencion_catalogo(texto: str) -> Optional[tuple[str, str]]:
     return None
 
 
+def _es_pedido_repeticion(texto: str) -> bool:
+    if not texto:
+        return False
+    texto_norm = _sin_acentos(texto.lower())
+    patrones = [
+        r"\blo\s+mismo\s+que\s+antes\b",
+        r"\b(lo|haz|hace|haceme|hacelo)\s+(de\s+)?(nuevo|igual)\b",
+        r"\brepite\s+lo\s+(anterior|mismo)\b",
+        r"\blo\s+de\s+(reci[eé]n|antes)\b",
+    ]
+    return any(re.search(patron, texto_norm) for patron in patrones)
+
+
+def _repetir_ultima_accion() -> Tuple[bool, str]:
+    if not historial_acciones:
+        return False, "No recuerdo una acción previa todavía."
+    ultima = historial_acciones[-1]
+    tipo = ultima.get("tipo")
+    if tipo == "ventana":
+        accion = ultima.get("accion")
+        objetivo = ultima.get("objetivo")
+        if not accion or not objetivo:
+            return False, "No pude repetir la acción de ventana."
+        try:
+            ejecutar_accion_ventana(accion, objetivo)
+            registrar_accion({"tipo": "ventana", "accion": accion, "objetivo": objetivo})
+            return True, f"Repetí la acción de ventana: {accion} {objetivo}"
+        except RuntimeError as exc:
+            return False, str(exc)
+    if tipo == "atajo":
+        combos = ultima.get("combos")
+        descripcion = ultima.get("descripcion") or "Atajo de teclado repetido."
+        if not combos:
+            return False, "No tengo guardado el atajo anterior."
+        combos_tuplas: List[Tuple[str, ...]] = []
+        for combo in combos:
+            if isinstance(combo, (list, tuple)):
+                combos_tuplas.append(tuple(str(k) for k in combo))
+            else:
+                combos_tuplas.append((str(combo),))
+        if _ejecutar_combos_teclado(combos_tuplas):
+            registrar_accion({"tipo": "atajo", "combos": combos_tuplas, "descripcion": descripcion})
+            return True, descripcion
+        return False, "El atajo anterior falló al repetirse."
+    if tipo == "comandos":
+        comandos = ultima.get("comandos")
+        if not comandos:
+            return False, "No encuentro los comandos anteriores."
+        if ejecutar_comandos_en_cadena(comandos):
+            registrar_accion({"tipo": "comandos", "comandos": comandos})
+            return True, "Repetí los comandos anteriores."
+        return False, "Los comandos anteriores fallaron al repetirse."
+    return False, "No pude interpretar la última acción."
+
+
+def _detectar_accion_ventana(texto: str) -> Optional[tuple[str, str]]:
+    texto_base = texto or ""
+    texto_normalizado = _sin_acentos(texto_base)
+    patrones = [
+        (
+            r"\b(maximiza(?:r|me|lo|la)?|agranda|pon[ei] en pantalla completa)\s+([^\.,;]+)",
+            "maximizar",
+        ),
+        (
+            r"\b(minimiza(?:r|me|lo|la)?|achica|reduce)\s+([^\.,;]+)",
+            "minimizar",
+        ),
+        (
+            r"\b(enfoca(?:r|me|la)?|pon[ei] al frente|trae al frente)\s+([^\.,;]+)",
+            "enfocar",
+        ),
+    ]
+    for patron, accion in patrones:
+        match = re.search(patron, texto_normalizado, re.IGNORECASE)
+        if not match:
+            continue
+        inicio = match.start(2)
+        fin = match.end(2)
+        fragmento_original = texto_base[inicio:fin].strip()
+        fragmento_normalizado = texto_normalizado[inicio:fin].strip()
+        fragmento = fragmento_original or fragmento_normalizado
+        if not fragmento:
+            continue
+        fragmento_sin_acentos = _sin_acentos(fragmento)
+        for separador in [" y ", " luego ", " despues ", " entonces ", ",", ".", ";"]:
+            separador_busqueda = separador.strip()
+            pos = fragmento_sin_acentos.find(separador_busqueda)
+            if pos > 0:
+                fragmento = fragmento[:pos].strip()
+                fragmento_sin_acentos = fragmento_sin_acentos[:pos].strip()
+                break
+        if fragmento:
+            fragmento = re.sub(r"^(la|el)\s+", "", fragmento, flags=re.IGNORECASE)
+            fragmento = re.sub(r"^(ventana|aplicacion|app)\s+de\s+", "", fragmento, flags=re.IGNORECASE)
+            fragmento = re.sub(r"^(ventana|aplicacion|app)\s+", "", fragmento, flags=re.IGNORECASE)
+            fragmento = fragmento.strip()
+            return accion, fragmento
+    return None
+
+
 def comando_abrir_desde_app(app: Dict[str, Any]) -> Optional[str]:
     tipo = str(app.get("tipo") or app.get("type") or "").lower()
     launch = str(app.get("launch") or "").strip()
@@ -808,6 +1119,48 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
         return
 
     mensaje = texto_acumulado.strip()
+    if _es_pedido_repeticion(mensaje):
+        ok, mensaje_historial = _repetir_ultima_accion()
+        if ok:
+            hud.log(mensaje_historial)
+        else:
+            hud.log(mensaje_historial)
+        texto_acumulado = ""
+        threading.Timer(2, hud.ocultar).start()
+        return
+
+    atajo = _detectar_atajo_teclado(mensaje)
+    if atajo:
+        logger.info("Atajo de teclado detectado: %s", atajo.get('id'))
+        if ejecutar_atajo_teclado(atajo):
+            registrar_accion({"tipo": "atajo", "combos": [tuple(c) for c in atajo.get("combos", [])], "descripcion": atajo.get("descripcion")})
+            hud.log(atajo.get("descripcion") or "Atajo ejecutado.")
+        else:
+            hud.log("No pude ejecutar el atajo.")
+        texto_acumulado = ""
+        threading.Timer(2, hud.ocultar).start()
+        return
+
+    accion_ventana = _detectar_accion_ventana(mensaje)
+    if accion_ventana:
+        accion, objetivo = accion_ventana
+        logger.info("Acción de ventana detectada: %s -> %s", accion, objetivo)
+        try:
+            ejecutar_accion_ventana(accion, objetivo)
+        except RuntimeError as exc:
+            hud.log(str(exc))
+        else:
+            registrar_accion({"tipo": "ventana", "accion": accion, "objetivo": objetivo})
+            mensajes_ok = {
+                "maximizar": f"Ventana maximizada: {objetivo}",
+                "minimizar": f"Ventana minimizada: {objetivo}",
+                "enfocar": f"Ventana enfocada: {objetivo}",
+            }
+            hud.log(mensajes_ok.get(accion, f"Accion sobre ventana completada: {objetivo}"))
+        texto_acumulado = ""
+        threading.Timer(2, hud.ocultar).start()
+        return
+
     logger.info("Consultando Cohere para la orden: %s", mensaje)
 
     contexto_app = None
@@ -838,29 +1191,11 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
                 comandos[0] = comando_catalogo
         comandos_generados = ";".join(comandos)
         if ejecutar_comandos_en_cadena(comandos_generados):
+            registrar_accion({"tipo": "comandos", "comandos": comandos_generados})
             texto_acumulado = ""
             threading.Timer(2, hud.ocultar).start()
             return
         logger.warning("Los comandos sugeridos por Cohere fallaron: %s", comandos_generados)
-
-    if accion_objetivo and nombre_objetivo:
-        logger.info("Cohere falló, intento resolver '%s %s' desde el catálogo.", accion_objetivo, nombre_objetivo)
-        if accion_objetivo == "abrir" and contexto_app:
-            comando_final = comando_abrir_desde_app(contexto_app) or contexto_app.get("comando")
-            if comando_final:
-                hud.log(f"Ejecutando [ {nombre_objetivo} ]...")
-                if ejecutar_comando_cmd(comando_final):
-                    hud.log(f"Listo, {nombre_objetivo} fue abierto.")
-                    actualizar_ultima_vez(nombre_objetivo)
-                    texto_acumulado = ""
-                    threading.Timer(2, hud.ocultar).start()
-                    return
-        elif accion_objetivo == "cerrar":
-            if ejecutar_accion_desde_catalogo(nombre_objetivo, "cerrar"):
-                hud.log(f"Listo, {nombre_objetivo} fue cerrado.")
-                texto_acumulado = ""
-                threading.Timer(2, hud.ocultar).start()
-                return
 
     hud.log("No pude interpretar la orden.")
     texto_acumulado = ""
