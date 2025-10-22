@@ -54,6 +54,7 @@ KERNEL32 = ctypes.windll.kernel32
 
 follow_up_mode = False
 follow_up_lock = threading.Lock()
+FOLLOW_UP_PROMPT = "¿Necesitás algo más?"
 FOLLOW_UP_EXIT_FRASES = {
     "nada",
     "nada mas",
@@ -1161,6 +1162,20 @@ def _es_frase_fin_seguimiento(texto: str) -> bool:
     return False
 
 
+def _mensaje_follow_up(mensaje: str) -> str:
+    base = (mensaje or "").strip()
+    if not base:
+        return FOLLOW_UP_PROMPT
+    if FOLLOW_UP_PROMPT.lower() in base.lower():
+        return base
+    return f"{base}\n{FOLLOW_UP_PROMPT}"
+
+
+def notificar_y_activar_follow_up(mensaje: str) -> None:
+    hud.log(_mensaje_follow_up(mensaje))
+    iniciar_follow_up(force_start=True)
+
+
 def finalizar_follow_up(mensaje: str) -> None:
     global follow_up_mode, texto_acumulado
     hud.log(mensaje)
@@ -1495,11 +1510,9 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
         texto_respuesta = str((interpretacion.get("texto") if interpretacion else "") or "").strip()
         if not texto_respuesta:
             texto_respuesta = generar_respuesta_con_cohere(mensaje) or "Perdón, ¿podrías repetirme?"
-        mensaje_combo = f"{texto_respuesta}\n¿Necesitás algo más?"
-        hud.log(mensaje_combo)
         registrar_accion({"tipo": "respuesta", "texto": texto_respuesta})
         texto_acumulado = ""
-        iniciar_follow_up(force_start=True)
+        notificar_y_activar_follow_up(texto_respuesta)
         return
 
     if interpret_tipo == "escribir_texto":
@@ -1510,19 +1523,15 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
                 pyautogui.write(texto_formateado)
                 registrar_accion({"tipo": "texto", "texto": texto_formateado})
                 mensaje_escritura = f"Escribiendo: {texto_formateado}"
-                if follow_up_mode:
-                    hud.log(f"{mensaje_escritura}\n¿Necesitás algo más?")
-                else:
-                    hud.log(mensaje_escritura)
+                texto_acumulado = ""
+                notificar_y_activar_follow_up(mensaje_escritura)
+                return
             except Exception as exc:
                 hud.log(f"No pude escribir: {exc}")
         else:
             hud.log("Cohere no envió contenido para escribir.")
         texto_acumulado = ""
-        if follow_up_mode:
-            iniciar_follow_up()
-        else:
-            threading.Timer(2, hud.ocultar).start()
+        threading.Timer(2, hud.ocultar).start()
         return
 
     if interpret_tipo == "atajo":
@@ -1535,12 +1544,7 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
                 "descripcion": descripcion_atajo,
             })
             texto_acumulado = ""
-            if follow_up_mode:
-                hud.log(f"{descripcion_atajo}\n¿Necesitás algo más?")
-                iniciar_follow_up()
-            else:
-                hud.log(descripcion_atajo)
-                threading.Timer(2, hud.ocultar).start()
+            notificar_y_activar_follow_up(descripcion_atajo)
             return
         if interpretacion:
             logger.warning(
@@ -1567,9 +1571,10 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
             logger.info("Atajo de teclado detectado: %s", atajo.get("id"))
             if ejecutar_atajo_teclado(atajo):
                 registrar_accion({"tipo": "atajo", "combos": atajo.get("combos", []), "descripcion": atajo.get("descripcion")})
-                hud.log(atajo.get("descripcion") or "Atajo ejecutado.")
-            else:
-                hud.log("No pude ejecutar el atajo.")
+                texto_acumulado = ""
+                notificar_y_activar_follow_up(atajo.get("descripcion") or "Atajo ejecutado.")
+                return
+            hud.log("No pude ejecutar el atajo.")
             texto_acumulado = ""
             threading.Timer(2, hud.ocultar).start()
             return
@@ -1580,12 +1585,14 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
             try:
                 texto_formateado = _preparar_texto_escribir(texto_a_escribir)
                 pyautogui.write(texto_formateado)
-                registrar_accion({"tipo": "texto", "texto": texto_formateado})
-                hud.log(f"Escribiendo: {texto_formateado}")
             except Exception as exc:
                 hud.log(f"No pude escribir: {exc}")
+                texto_acumulado = ""
+                threading.Timer(2, hud.ocultar).start()
+                return
+            registrar_accion({"tipo": "texto", "texto": texto_formateado})
             texto_acumulado = ""
-            threading.Timer(2, hud.ocultar).start()
+            notificar_y_activar_follow_up(f"Escribiendo: {texto_formateado}")
             return
 
     accion_ventana = _detectar_accion_ventana(mensaje)
@@ -1603,7 +1610,10 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
                 "minimizar": f"Ventana minimizada: {objetivo}",
                 "enfocar": f"Ventana enfocada: {objetivo}",
             }
-            hud.log(mensajes_ok.get(accion, f"Accion sobre ventana completada: {objetivo}"))
+            mensaje_ventana = mensajes_ok.get(accion, f"Accion sobre ventana completada: {objetivo}")
+            texto_acumulado = ""
+            notificar_y_activar_follow_up(mensaje_ventana)
+            return
         texto_acumulado = ""
         threading.Timer(2, hud.ocultar).start()
         return
@@ -1624,9 +1634,7 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
         catalogo_actual=catalogo_ref,
     )
     if sugerencia:
-        descripcion = sugerencia.get("descripcion")
-        if descripcion:
-            hud.log(descripcion)
+        descripcion = str(sugerencia.get("descripcion") or "").strip()
         comandos = list(sugerencia["comandos"])
         if accion_objetivo == "abrir" and contexto_app:
             comando_catalogo = comando_abrir_desde_app(contexto_app) or contexto_app.get("comando")
@@ -1636,20 +1644,20 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
         if ejecutar_comandos_en_cadena(comandos_generados):
             registrar_accion({"tipo": "comandos", "comandos": comandos_generados})
             texto_acumulado = ""
-            threading.Timer(2, hud.ocultar).start()
+            mensaje_exitoso = descripcion or "Acción completada."
+            notificar_y_activar_follow_up(mensaje_exitoso)
             return
         logger.warning("Los comandos sugeridos por Cohere fallaron: %s", comandos_generados)
 
     respuesta_conversacional = generar_respuesta_con_cohere(mensaje)
     if respuesta_conversacional:
-        hud.log(respuesta_conversacional)
         registrar_accion({"tipo": "respuesta", "texto": respuesta_conversacional})
-        delay = 6
-    else:
-        hud.log("No pude interpretar la orden.")
-        delay = 2
+        texto_acumulado = ""
+        notificar_y_activar_follow_up(respuesta_conversacional)
+        return
+    hud.log("No pude interpretar la orden.")
     texto_acumulado = ""
-    threading.Timer(delay, hud.ocultar).start()
+    threading.Timer(2, hud.ocultar).start()
 def enviar_mensaje_final_automatico() -> None:
     timeout = 60 if es_pregunta_larga(texto_acumulado) else 5
     enviar_mensaje_final(timeout=timeout)
