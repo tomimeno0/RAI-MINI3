@@ -1,0 +1,17 @@
+# Dependencias principales
+customtkinter
+keyboard
+psutil
+pyautogui
+pygetwindow
+SpeechRecognition
+pyaudio
+# Integración opcional (usada si configuras API)
+cohere
+
+# Windows: utilidades de ventanas (recomendado)
+pywin32
+
+# Automatización web
+selenium
+webdriver-manager
