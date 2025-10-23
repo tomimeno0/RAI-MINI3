@@ -192,16 +192,38 @@ def _default_catalog() -> List[Dict[str, Any]]:
     return catalog
 
 
+def _build_alias_index(catalog: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    alias_index: Dict[str, Dict[str, Any]] = {}
+    for app in catalog:
+        identifier = str(app.get("id") or "").strip()
+        if not identifier:
+            continue
+        lower_identifier = identifier.lower()
+        alias_index[lower_identifier] = app
+        raw_aliases = app.get("aliases") or []
+        if isinstance(raw_aliases, (list, tuple)):
+            for alias in raw_aliases:
+                if not isinstance(alias, str):
+                    continue
+                normalized_alias = alias.strip().lower()
+                if not normalized_alias:
+                    continue
+                alias_index.setdefault(normalized_alias, app)
+    return alias_index
+
+
 ACTIONS_CATALOG: List[Dict[str, Any]] = _load_catalog_from_json() or _default_catalog()
+_ALIASES_TO_APP: Dict[str, Dict[str, Any]] = _build_alias_index(ACTIONS_CATALOG)
 
 
 def find_app_by_alias(alias: str) -> Optional[Dict[str, object]]:
-    alias_lower = alias.lower()
-    for app in ACTIONS_CATALOG:
-        identifiers = {app["id"].lower()} | {a.lower() for a in app["aliases"]}
-        if alias_lower in identifiers:
-            return app
-    return None
+    if not isinstance(alias, str):
+        return None
+    alias_lower = alias.strip().lower()
+    if not alias_lower:
+        return None
+    app = _ALIASES_TO_APP.get(alias_lower)
+    return cast(Optional[Dict[str, object]], app)
 
 
 def _actions_map(app: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -588,9 +610,14 @@ def list_known_apps() -> Dict[str, Dict[str, Any]]:
         if not key:
             continue
         raw_aliases = app.get("aliases") or []
-        if isinstance(raw_aliases, str):
-            raw_aliases = [raw_aliases]
-        friendly = _unique_strings(raw_aliases)
+        if isinstance(raw_aliases, list):
+            friendly = list(raw_aliases)
+        elif isinstance(raw_aliases, tuple):
+            friendly = list(raw_aliases)
+        elif isinstance(raw_aliases, str):
+            friendly = [raw_aliases]
+        else:
+            friendly = []
         index[key] = {
             "key": key,
             "friendly": friendly,

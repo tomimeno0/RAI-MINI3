@@ -104,6 +104,31 @@ def actualizar_texto():
             set_estado("procesando", texto)
     root.after(100, actualizar_texto)
 
+
+def _animate_alpha(target_alpha: float, duration_ms: int = 300, on_complete=None) -> None:
+    """Realiza una animacion de transparencia sin bloquear el hilo principal."""
+    if not root:
+        return
+    try:
+        start_alpha = float(root.attributes("-alpha"))
+    except Exception:
+        start_alpha = 0.0
+    steps = max(duration_ms // 30, 1)
+    delta = (target_alpha - start_alpha) / steps if steps else 0.0
+
+    def _tick(step: int, current: float) -> None:
+        if not root:
+            return
+        if step >= steps:
+            root.attributes("-alpha", target_alpha)
+            if on_complete:
+                on_complete()
+            return
+        root.attributes("-alpha", max(0.0, min(1.0, current)))
+        root.after(30, lambda: _tick(step + 1, current + delta))
+
+    _tick(0, start_alpha)
+
 def iniciar_hud():
     global root, frame, bubble_label, POSICION_ORIGINAL_X, POSICION_ORIGINAL_Y
 
@@ -152,18 +177,11 @@ def iniciar_hud():
 
 def fade_in():
     if root:
-        for i in range(0, 11):
-            alpha = i / 10
-            root.attributes("-alpha", alpha)
-            time.sleep(0.03)
+        _animate_alpha(1.0)
 
 def fade_out():
     if root:
-        for i in range(10, -1, -1):
-            alpha = i / 10
-            root.attributes("-alpha", alpha)
-            time.sleep(0.03)
-        root.withdraw()
+        _animate_alpha(0.0, on_complete=root.withdraw)
 
 def expandir_altura_suave(paso=3, delay=3):
     alto_actual = root.winfo_height()
