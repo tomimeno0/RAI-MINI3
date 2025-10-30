@@ -180,7 +180,7 @@ namespace RaiMiniLauncher
                     return null;
                 }
 
-                var interpreter = ResolvePython();
+                var interpreter = ResolvePython(preferConsole: showConsole);
                 if (string.IsNullOrEmpty(interpreter))
                 {
                     ShowBalloon("No se encontro un interprete de Python disponible.", ToolTipIcon.Error);
@@ -189,7 +189,8 @@ namespace RaiMiniLauncher
 
                 if (showConsole)
                 {
-                    var command = Quote(interpreter) + " " + Quote(clientPath);
+                    var commandArgs = "-u " + Quote(clientPath); // -u para salida sin buffer en consola
+                    var command = Quote(interpreter) + " " + commandArgs;
                     return new ProcessStartInfo
                     {
                         FileName = "cmd.exe",
@@ -232,19 +233,27 @@ namespace RaiMiniLauncher
             };
         }
 
-        private string ResolvePython()
+        private string ResolvePython(bool preferConsole)
         {
-            var candidates = new[]
-            {
-                Path.Combine(baseDir, ".venv", "Scripts", "pythonw.exe"),
-                Path.Combine(baseDir, ".venv", "Scripts", "python.exe"),
-                "pythonw.exe",
-                "python.exe",
-                "pyw",
-                "py",
-                "pythonw",
-                "python"
-            };
+            string[] candidates = preferConsole
+                ? new[]
+                {
+                    Path.Combine(baseDir, ".venv", "Scripts", "python.exe"),
+                    "python.exe",
+                    "py",
+                    "python"
+                }
+                : new[]
+                {
+                    Path.Combine(baseDir, ".venv", "Scripts", "pythonw.exe"),
+                    Path.Combine(baseDir, ".venv", "Scripts", "python.exe"),
+                    "pythonw.exe",
+                    "python.exe",
+                    "pyw",
+                    "py",
+                    "pythonw",
+                    "python"
+                };
 
             foreach (var candidate in candidates)
             {
