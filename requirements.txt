@@ -11,7 +11,3 @@ cohere
 
 # Windows: utilidades de ventanas (recomendado)
 pywin32
-
-# Automatización web
-selenium
-webdriver-manager
