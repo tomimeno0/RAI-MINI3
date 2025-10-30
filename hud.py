@@ -4,43 +4,53 @@ import threading
 import time
 from pathlib import Path
 from queue import Queue
+# Módulo HUD (Head-Up Display) visual para RAI-MINI.
+# - Implementa una ventana flotante y transparente con CustomTkinter para mostrar estados y mensajes.
+# - Ofrece animaciones suaves (fade in/out, tipeo letra a letra) sin bloquear el hilo principal de Tkinter.
+# - Expone funciones para mostrar/ocultar/actualizar el HUD desde otros módulos (p. ej., client.py).
 
 import customtkinter as ctk
 import tkinter as tk
 try:
+    # winsound es específico de Windows; si no existe (otro SO), el sonido se deshabilita de forma segura.
     import winsound
 except ImportError:
     winsound = None
 
-from tkinter import Label as TkLabel  # usarlo para medir sin mostrar
+from tkinter import Label as TkLabel  # usarlo para medir sin mostrar (cálculo de alto requerido)
 
 
-typing_lock = threading.Lock()
-msg_queue = Queue()
+typing_lock = threading.Lock()  # Lock para sincronizar animación de tipeo y evitar superposición.
+msg_queue = Queue()  # Cola de mensajes que alimenta el HUD desde threads externos.
 
-root = None
-frame = None
-content_frame = None
-bubble_label = None
-hud_visible = False
-texto_acumulado = ""
-_SOUND_FILE = Path(__file__).with_name("notify.wav")
-ICON_FILE = Path(__file__).with_name("RAI_option_A.ico")
-ICON_PNG_FALLBACK = Path(__file__).with_name("optionA_1024.png")
-APP_USER_MODEL_ID = "RAI.MINI.HUD"
+root = None  # Ventana principal de CustomTkinter, creada en iniciar_hud().
+frame = None  # Marco de contenido con borde redondeado y color de estado.
+content_frame = None  # Contenedor interno opcional (no siempre usado).
+bubble_label = None  # Etiqueta donde se muestra el texto de estado/respuesta.
+hud_visible = False  # Flag lógico para saber si el HUD está visible o en fade-out.
+texto_acumulado = ""  # Buffer de texto para la animación de tipeo.
+_SOUND_FILE = Path(__file__).with_name("notify.wav")  # Sonido local para notificaciones si existe.
+ICON_FILE = Path(__file__).with_name("RAI_option_A.ico")  # Ícono preferido para ventana/console en Windows.
+ICON_PNG_FALLBACK = Path(__file__).with_name("optionA_1024.png")  # Fallback PNG si el .ico falla.
+APP_USER_MODEL_ID = "RAI.MINI.HUD"  # AppUserModelID para agrupar iconos en la barra de tareas.
 
-TRANSPARENT_COLOR = "#010101"
-HUD_BACKGROUND_COLOR = "#0b1324"
-HUD_BORDER_RADIUS = 28
-HUD_BORDER_WIDTH = 3
-HUD_PADDING = 14
-CONTENT_PADDING = 20
-HUD_MAX_CHARS = 70
+TRANSPARENT_COLOR = "#010101"  # Color que puede usarse como transparencia según el gestor de ventanas.
+HUD_BACKGROUND_COLOR = "#0b1324"  # Color de fondo del HUD (tema oscuro).
+HUD_BORDER_RADIUS = 28  # Radio de esquinas del marco principal.
+HUD_BORDER_WIDTH = 3  # Ancho del borde que cambia de color según estado.
+HUD_PADDING = 14  # Margen externo del frame dentro de la ventana.
+CONTENT_PADDING = 20  # Margen interno para el contenido (label) dentro del frame.
+HUD_MAX_CHARS = 70  # Límite de caracteres visibles; el resto se recorta con elipsis.
 
-window_icon_photo = None
-icon_handles: list[int] = []
+window_icon_photo = None  # Referencia al ícono cargado como PhotoImage para evitar GC.
+icon_handles: list[int] = []  # Handles de iconos nativos (para liberar si hiciera falta a futuro).
 
 def _play_sound(fallback_alias: str) -> None:
+    """Reproduce un sonido de notificación si winsound está disponible.
+
+    - Prefiere un archivo local notify.wav si existe; si no, usa un alias del sistema (p.ej. SystemNotification).
+    - Modo asíncrono para no bloquear la UI.
+    """
     if winsound is None:
         return
     try:
@@ -49,32 +59,34 @@ def _play_sound(fallback_alias: str) -> None:
         else:
             winsound.PlaySound(fallback_alias, winsound.SND_ALIAS | winsound.SND_ASYNC)
     except Exception:
-        pass
+        pass  # Fallar en silencio: el HUD no depende del audio.
 
 
 def _ensure_app_user_model_id() -> None:
+    """Configura el AppUserModelID en Windows para agrupar iconos correctamente en la barra de tareas."""
     if sys.platform != "win32":
         return
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(ctypes.c_wchar_p(APP_USER_MODEL_ID))
     except Exception:
-        pass
+        pass  # Si falla, la UI seguirá funcionando; solo se pierde la agrupación precisa del icono.
 
 
 def _apply_window_icon(window: ctk.CTk | None) -> None:
+    """Aplica el ícono a la ventana (ICO si es posible, PNG como fallback)."""
     if window is None:
         return
     icon_path = ICON_FILE if ICON_FILE.exists() else None
     fallback_image = ICON_PNG_FALLBACK if ICON_PNG_FALLBACK.exists() else None
 
-    applied = False
+    applied = False  # Marca si al menos una vía logró aplicar un ícono.
     if icon_path:
         try:
             window.iconbitmap(str(icon_path))
             applied = True
         except Exception:
             pass
-        if sys.platform == "win32":
+        if sys.platform == "win32":  # En Windows intentamos además establecer íconos grande/pequeño nativos.
             try:
                 handle = window.winfo_id()
                 IMAGE_ICON = 1
@@ -103,7 +115,7 @@ def _apply_window_icon(window: ctk.CTk | None) -> None:
                     ctypes.windll.user32.SendMessageW(handle, 0x0080, 0, hicon_small)
                     icon_handles.append(hicon_small)
                 if hicon_big or hicon_small:
-                    applied = True
+                    applied = True  # Consideramos éxito si al menos uno fue aplicado.
             except Exception:
                 pass
 
@@ -114,10 +126,11 @@ def _apply_window_icon(window: ctk.CTk | None) -> None:
             window.iconphoto(True, window_icon_photo)
             window.iconbitmap("@" + str(fallback_image))
         except Exception:
-            window_icon_photo = None
+            window_icon_photo = None  # Si falla todo, se queda sin ícono pero la ventana sigue operativa.
 
 
 def _apply_console_icon() -> None:
+    """Intenta aplicar el ícono al proceso de consola (si corre con consola visible en Windows)."""
     if sys.platform != "win32" or not ICON_FILE.exists():
         return
     try:
@@ -151,22 +164,24 @@ def _apply_console_icon() -> None:
             ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 0, hicon_small)
             icon_handles.append(hicon_small)
     except Exception:
-        pass
+        pass  # Errores aquí no deben afectar el HUD: es una mejora estética.
 
 
 def _limit_text(texto):
+    """Aplica un límite de caracteres con elipsis para evitar desbordes visuales."""
     if not isinstance(texto, str):
         return ""
     texto = texto.strip()
     if len(texto) <= HUD_MAX_CHARS:
         return texto
-    if HUD_MAX_CHARS <= 3:
+    if HUD_MAX_CHARS <= 3:  # Caso patológico: no hay espacio para elipsis; recorta directo.
         return texto[:HUD_MAX_CHARS]
     recortado = texto[: HUD_MAX_CHARS - 3].rstrip()
     return f"{recortado}..."
 
 
 def _update_frame_layout(width: int, height: int) -> None:
+    """Recalcula posiciones y tamaños internos cuando cambian las dimensiones del HUD."""
     if frame is None:
         return
     interior_w = max(0, width - 2 * HUD_PADDING)
@@ -209,9 +224,13 @@ def log(texto):
 
 
 def ejecutar_comando_desde_ui(texto: str) -> None:
-    """Invoca client.run_command en un hilo aparte y muestra la respuesta."""
+    """Invoca client.run_command en un hilo aparte y muestra la respuesta.
+
+    Evita bloquear el hilo principal de Tkinter importando dinámicamente el módulo client.
+    """
 
     def _worker(entrada: str) -> None:
+        # Hilo trabajador: ejecuta el comando y encola la respuesta para el HUD.
         try:
             from importlib import import_module
 
@@ -229,11 +248,12 @@ def ejecutar_comando_desde_ui(texto: str) -> None:
 
     if not isinstance(texto, str) or not texto.strip():
         log("Ingresa un comando valido.")
-        return
+        return  # Validación rápida: no crear hilo cuando no hay entrada útil.
 
     threading.Thread(target=_worker, args=(texto.strip(),), daemon=True).start()
 
 def set_estado(estado, texto):
+    """Actualiza borde e ícono/texto según el estado semántico (escuchando, procesando, etc.)."""
     if bubble_label and frame:
         color = estado_colores.get(estado, "#888")
         icono = estado_iconos.get(estado, "")
@@ -242,6 +262,7 @@ def set_estado(estado, texto):
         frame.configure(border_color=color)
 
 def actualizar_texto():
+    """Consume la cola de mensajes y ajusta el estado del HUD; se reprograma cada 100 ms."""
     while not msg_queue.empty():
         texto = msg_queue.get()
         if "Escuchando" in texto:
@@ -258,7 +279,7 @@ def actualizar_texto():
 
 
 def _animate_alpha(target_alpha: float, duration_ms: int = 300, on_complete=None) -> None:
-    """Realiza una animacion de transparencia sin bloquear el hilo principal."""
+    """Realiza una animacion de transparencia (fade) sin bloquear el hilo principal."""
     if not root:
         return
     try:
@@ -282,6 +303,7 @@ def _animate_alpha(target_alpha: float, duration_ms: int = 300, on_complete=None
     _tick(0, start_alpha)
 
 def iniciar_hud():
+    """Inicializa y muestra el HUD principal (bloquea con mainloop)."""
     global root, frame, bubble_label, POSICION_ORIGINAL_X, POSICION_ORIGINAL_Y
 
     ctk.set_appearance_mode("dark")
@@ -303,7 +325,7 @@ def iniciar_hud():
     root.resizable(False, False)
     root.configure(bg="black")
     root.attributes("-alpha", 0)
-    _apply_window_icon(root)
+    _apply_window_icon(root)  # Intenta aplicar icono a la ventana si hay recursos disponibles.
 
     frame = ctk.CTkFrame(
         root,
@@ -326,19 +348,22 @@ def iniciar_hud():
     )
     bubble_label.place(relx=0.5, rely=0.5, anchor="center")
 
-    actualizar_texto()
+    actualizar_texto()  # Inicia el ciclo de actualización no bloqueante por after().
     root.withdraw()
     root.mainloop()
 
 def fade_in():
+    """Efecto de aparecer suavemente"""
     if root:
         _animate_alpha(1.0)
 
 def fade_out():
+    """Efecto de desaparecer suavemente y ocultar la ventana"""
     if root:
         _animate_alpha(0.0, on_complete=root.withdraw)
 
 def expandir_altura_suave(paso=3, delay=3):
+    """Aumenta la altura en pequeños pasos programados con after() para animación suave."""
     alto_actual = root.winfo_height()
     if alto_actual < ALTO_EXPANDIDO:
         nuevo_alto = min(alto_actual + paso, ALTO_EXPANDIDO)
@@ -382,6 +407,7 @@ def mostrar(texto=None, es_expansivo=False, after=None, es_bienvenida=False):
 
 
 def ocultar():
+    """Oculta el HUD con fade-out y restaura posición/tamaño originales."""
     _play_sound("SystemExit")
     global hud_visible
 
@@ -409,6 +435,7 @@ def ocultar():
 
 
 def set_texto_animado(texto, delay=0.03, estado="procesando", after=None):
+    """Escribe el texto caracter por caracter en un hilo, con color de estado."""
     texto = _limit_text(texto)
     def escribir():
         global texto_acumulado
@@ -427,6 +454,7 @@ def set_texto_animado(texto, delay=0.03, estado="procesando", after=None):
     threading.Thread(target=escribir).start()
 
 def procesar_respuesta_rai(texto):
+    """Distingue entre comando (acciones) y respuesta conversacional, y actúa en consecuencia."""
     comandos_validos = ("abrir ", "cerrar ", "reiniciar ", "iniciar ", "buscar ")
     es_comando = any(texto.lower().startswith(c) for c in comandos_validos)
 
@@ -438,6 +466,7 @@ def procesar_respuesta_rai(texto):
         mostrar_respuesta_final(texto)
 
 def mostrar_respuesta_final(texto):
+    """Muestra una respuesta de texto expandiendo alto según contenido y aplicando fade-in."""
     global hud_visible
     hud_visible = True
 
@@ -474,6 +503,7 @@ def mostrar_respuesta_final(texto):
 
 
 def calcular_altura_requerida(texto, ancho, fuente=("SF Pro Display", 19)):
+    """Calcula el alto requerido para el label dado un ancho y fuente, sin mostrarlo."""
     texto = _limit_text(texto)
     dummy = TkLabel(root, text=texto, font=fuente, wraplength=ancho - 40, justify="left")
     dummy.update_idletasks()

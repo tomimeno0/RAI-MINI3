@@ -4,6 +4,9 @@ using System.Drawing;
 using System.IO;
 using System.Threading;
 using System.Windows.Forms;
+// Lanzador tipo bandeja del sistema para RAI-MINI.
+// - Muestra un icono en el área de notificación y permite abrir la terminal o salir.
+// - Inicia client.py (o un .bat de configuración) ya sea con consola visible o en modo silencioso.
 
 namespace RaiMiniLauncher
 {
@@ -67,14 +70,16 @@ namespace RaiMiniLauncher
 
             if (mode == LaunchMode.Setup)
             {
-                ShowBalloon("No se encontro apps.json. Ejecutando run_rai_mini.bat en modo silencioso.", ToolTipIcon.Info);
+                ShowBalloon("No se encontro apps.json. Ejecutando run_rai_mini.bat con consola visible.", ToolTipIcon.Info);
+                // En modo de configuracion (sin apps.json), mostrar la consola del .bat
+                StartProcess(showConsole: true);
             }
             else
             {
                 ShowBalloon("RAI esta escuchando en segundo plano.", ToolTipIcon.Info);
+                // En modo cliente por defecto corre en segundo plano (sin consola)
+                StartProcess(showConsole: false);
             }
-
-            StartProcess(showConsole: false);
         }
 
         private void OnOpenTerminal(object sender, EventArgs e)
@@ -89,7 +94,7 @@ namespace RaiMiniLauncher
                 return;
             }
 
-            StartProcess(showConsole: true);
+            StartProcess(showConsole: true); // Permite al usuario ver la consola interactiva.
         }
 
         private void OnExit(object sender, EventArgs e)
@@ -214,7 +219,7 @@ namespace RaiMiniLauncher
             }
 
             var commandLine = Quote(batchPath);
-            var arguments = (showConsole ? "/k " : "/c ") + Quote(commandLine);
+            var arguments = (showConsole ? "/k " : "/c ") + Quote(commandLine); // /k deja la consola abierta, /c la cierra.
 
             return new ProcessStartInfo
             {

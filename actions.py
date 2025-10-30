@@ -1,4 +1,10 @@
 # Dependencias opcionales: pip install pywin32 pygetwindow
+# Comentario general del módulo:
+# - Este archivo implementa acciones para abrir/cerrar aplicaciones y controlar sus ventanas en Windows.
+# - Carga un catálogo JSON (apps.json) con definiciones de aplicaciones, alias y comandos personalizados.
+# - Si el JSON no existe o es inválido, se usa un catálogo por defecto con apps comunes.
+# - Se intenta utilizar pygetwindow (opcional) para manipular ventanas por título; si no está, se informa.
+# - Todas las funciones públicas devuelven un diccionario estandarizado (ActionResponse) con ok y msg.
 """Acciones concretas para controlar aplicaciones y ventanas en Windows."""
 
 from __future__ import annotations
@@ -11,59 +17,68 @@ import subprocess
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict, cast
 
 try:
+    # Intento importar pygetwindow para enumerar y manipular ventanas por título en Windows.
+    # Si no está instalado o falla el import, el control de ventanas cae a mensajes informativos.
     import pygetwindow as gw  # type: ignore
 except Exception:  # pragma: no cover - dependencia opcional
+    # pygetwindow no disponible: se usará None para evitar fallos y mostrar mensajes claros.
     gw = None
 
 
-CATALOG_PATH = Path(__file__).with_name("apps.json")
+CATALOG_PATH = Path(__file__).with_name("apps.json")  # Archivo de catálogo junto a este módulo.
 
 
 class ActionResponse(TypedDict):
-    """Respuesta estandarizada para operaciones sobre aplicaciones."""
+    """Respuesta estandarizada para operaciones sobre aplicaciones.
 
-    ok: bool
-    msg: str
+    - ok: True si la operación fue exitosa, False en caso contrario.
+    - msg: Mensaje legible para HUD/logs indicando qué pasó o el motivo del fallo.
+    """
+
+    ok: bool  # Indicador de éxito o error de la acción.
+    msg: str  # Descripción textual del resultado.
 
 
 def _unique_strings(values: Iterable[object]) -> List[str]:
-    seen = set()
+    # Deduplíca strings (case-insensitive), ignorando vacíos y valores no-string.
+    seen = set()  # Mantiene los vistos en minúsculas para evitar duplicados por mayúsculas/minúsculas.
     cleaned: List[str] = []
     for value in values:
-        if not isinstance(value, str):
+        if not isinstance(value, str):  # Ignora elementos que no sean texto.
             continue
-        stripped = value.strip()
-        if not stripped or stripped.lower() in seen:
+        stripped = value.strip()  # Recorta espacios para normalizar comparaciones y salida.
+        if not stripped or stripped.lower() in seen:  # Omite vacíos y duplicados lógicos.
             continue
-        seen.add(stripped.lower())
-        cleaned.append(stripped)
+        seen.add(stripped.lower())  # Registra la variante en minúsculas para deduplicación.
+        cleaned.append(stripped)  # Conserva la forma recortada original.
     return cleaned
 
 
 def _normalize_entry(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    app_id = str(data.get("id", "")).strip()
-    if not app_id:
+    # Normaliza una entrada del catálogo (dict crudo) a una estructura interna consistente.
+    app_id = str(data.get("id", "")).strip()  # id obligatorio de la app (clave primaria lógica).
+    if not app_id:  # Sin id no se puede indexar ni deduplicar.
         return None
 
-    raw_aliases = data.get("aliases") or []
+    raw_aliases = data.get("aliases") or []  # Alias alternativos para búsqueda y comandos por voz.
     if isinstance(raw_aliases, str):
         raw_aliases = [raw_aliases]
     aliases = _unique_strings([app_id, *raw_aliases])
 
-    app_type = str(data.get("type", "exe")).strip().lower() or "exe"
+    app_type = str(data.get("type", "exe")).strip().lower() or "exe"  # exe (por defecto) o uwp.
 
-    window_hints_raw = data.get("window_hints") or []
+    window_hints_raw = data.get("window_hints") or []  # Pistas de título para localizar ventanas.
     if isinstance(window_hints_raw, str):
         window_hints_raw = [window_hints_raw]
     window_hints = _unique_strings(window_hints_raw) or [app_id]
 
-    raw_paths: Iterable[object]
+    raw_paths: Iterable[object]  # Rutas candidatas al ejecutable.
     if isinstance(data.get("paths"), list):
         raw_paths = data.get("paths", [])  # type: ignore[assignment]
     else:
         raw_paths = []
 
-    launch = data.get("launch")
+    launch = data.get("launch")  # Comando preferente para abrir (puede ser ruta).
     paths: List[str] = []
     for candidate in list(raw_paths):
         if isinstance(candidate, str) and candidate.strip():
@@ -71,7 +86,7 @@ def _normalize_entry(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if isinstance(launch, str) and launch.strip() and launch.strip() not in paths:
         paths.insert(0, launch.strip())
 
-    exe_name: Optional[str] = None
+    exe_name: Optional[str] = None  # Nombre del ejecutable si aplica (no UWP).
     if app_type != "uwp":
         for path in paths:
             expanded = os.path.expandvars(path)
@@ -80,8 +95,8 @@ def _normalize_entry(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 exe_name = candidate
                 break
 
-    raw_actions = data.get("actions") or data.get("acciones") or {}
-    actions: Dict[str, List[str]] = {}
+    raw_actions = data.get("actions") or data.get("acciones") or {}  # Soporta clave en inglés/español.
+    actions: Dict[str, List[str]] = {}  # Mapa normalizado acción -> lista de comandos.
     if isinstance(raw_actions, dict):
         for raw_key, raw_value in raw_actions.items():
             if not isinstance(raw_key, str):
@@ -116,6 +131,7 @@ def _normalize_entry(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _load_catalog_from_json() -> List[Dict[str, Any]]:
+    # Carga `apps.json` si existe, devolviendo entradas ya validadas y normalizadas.
     if not CATALOG_PATH.exists():
         return []
     try:
@@ -124,15 +140,15 @@ def _load_catalog_from_json() -> List[Dict[str, Any]]:
     except Exception:  # pragma: no cover - lectura defensiva
         return []
 
-    if isinstance(raw_data, dict):
+    if isinstance(raw_data, dict):  # Se permite objeto único o lista de objetos.
         raw_entries = [raw_data]
     elif isinstance(raw_data, list):
         raw_entries = raw_data
     else:
         return []
 
-    catalog: List[Dict[str, Any]] = []
-    seen_ids = set()
+    catalog: List[Dict[str, Any]] = []  # Resultado acumulado.
+    seen_ids = set()  # Para evitar IDs duplicados.
     for entry in raw_entries:
         if not isinstance(entry, dict):
             continue
@@ -147,6 +163,7 @@ def _load_catalog_from_json() -> List[Dict[str, Any]]:
 
 
 def _default_catalog() -> List[Dict[str, Any]]:
+    # Devuelve un catálogo embebido con algunas aplicaciones comunes para funcionar sin apps.json.
     defaults = [
         {
             "id": "whatsapp",
@@ -213,10 +230,17 @@ def _build_alias_index(catalog: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str,
 
 
 ACTIONS_CATALOG: List[Dict[str, Any]] = _load_catalog_from_json() or _default_catalog()
+# Se prefiere el catálogo en disco; si no existe o es inválido, se usa el por defecto.
 _ALIASES_TO_APP: Dict[str, Dict[str, Any]] = _build_alias_index(ACTIONS_CATALOG)
+# Índice alias->app para resolver ids y alias en tiempo O(1).
 
 
 def find_app_by_alias(alias: str) -> Optional[Dict[str, object]]:
+    """Resuelve un alias/id hacia la app correspondiente usando el índice de alias.
+
+    - Si `alias` no es string o está vacío, devuelve None.
+    - Caso contrario, retorna la entrada de aplicación normalizada o None si no existe.
+    """
     if not isinstance(alias, str):
         return None
     alias_lower = alias.strip().lower()
@@ -227,6 +251,10 @@ def find_app_by_alias(alias: str) -> Optional[Dict[str, object]]:
 
 
 def _actions_map(app: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Obtiene el dict de acciones personalizadas de la app si está bien formado.
+
+    Devuelve un dict vacío para datos ausentes o mal tipados para evitar errores río arriba.
+    """
     actions = app.get("actions")
     if isinstance(actions, dict):
         return actions
@@ -234,6 +262,10 @@ def _actions_map(app: Dict[str, Any]) -> Dict[str, List[str]]:
 
 
 def _select_action_commands(app: Dict[str, Any], keys: Iterable[str]) -> List[str]:
+    """Dado un conjunto de posibles nombres de acción, retorna los comandos configurados.
+
+    Recorre en orden y devuelve la primera lista no vacía encontrada, o [] si no hay coincidencias.
+    """
     actions = _actions_map(app)
     for key in keys:
         normalized = str(key).strip().lower()
@@ -253,6 +285,11 @@ _CONTROL_ACTION_ALIASES: Dict[str, Tuple[str, ...]] = {
 
 
 def _run_command(command: str, *, wait: bool) -> Tuple[bool, str]:
+    """Ejecuta un comando de sistema de forma segura.
+
+    - Si wait=True: bloquea hasta terminar y devuelve salida o error.
+    - Si wait=False: intenta Popen con lista de args si detecta ejecutable; sino usa shell.
+    """
     normalized = command.strip()
     if not normalized:
         return False, "Comando vacio"
@@ -285,6 +322,11 @@ def _run_command(command: str, *, wait: bool) -> Tuple[bool, str]:
 
 
 def _run_commands(commands: Iterable[str], *, wait: bool) -> Tuple[bool, str]:
+    """Ejecuta una lista de comandos en secuencia, abortando en el primer fallo.
+
+    Devuelve (ok, ultimo_mensaje), donde ultimo_mensaje es el último texto
+    no vacío retornado por _run_command.
+    """
     last_message = ""
     for command in commands:
         ok, message = _run_command(command, wait=wait)
@@ -296,6 +338,7 @@ def _run_commands(commands: Iterable[str], *, wait: bool) -> Tuple[bool, str]:
 
 
 def _control_success_message(action: str, app_id: str) -> str:
+    """Componer un mensaje de éxito consistente según la acción de ventana aplicada."""
     if action == "minimize":
         return f"Minimicé {app_id}"
     if action == "maximize":
@@ -306,6 +349,10 @@ def _control_success_message(action: str, app_id: str) -> str:
 
 
 def do_action(action: str, target: Optional[str], args: Dict[str, object]) -> Tuple[bool, str]:
+    """Router de acciones de alto nivel.
+
+    Recibe un nombre de acción y delega en la función privada correspondiente.
+    """
     if os.name != "nt":
         return False, "Solo disponible en Windows"
 
@@ -327,6 +374,14 @@ def do_action(action: str, target: Optional[str], args: Dict[str, object]) -> Tu
 
 
 def _open_app(target: Optional[str]) -> Tuple[bool, str]:
+    """Abrir una aplicación por su alias/id, priorizando comandos personalizados.
+
+    Flujo:
+    1) Si hay comandos definidos en el catálogo para abrir, se intentan primero.
+    2) Si es UWP, se usa `launch` con shell=True.
+    3) Si es EXE, se prueban rutas candidatas (paths + launch expandido).
+    4) Se devuelve (ok, msg) claro en cada caso.
+    """
     if not target:
         return False, "Necesito saber qué aplicación abrir"
     app = find_app_by_alias(target)
@@ -383,6 +438,10 @@ def _open_app(target: Optional[str]) -> Tuple[bool, str]:
 
 
 def _close_app(target: Optional[str]) -> Tuple[bool, str]:
+    """Cerrar una aplicación intentando distintas estrategias (Stop-Process, taskkill, ventana).
+
+    Se prefiere terminar el proceso por nombre si se dispone del exe; si no, se intenta por ventana.
+    """
     if not target:
         return False, "Necesito saber qué cerrar"
     app = find_app_by_alias(target)
@@ -469,6 +528,7 @@ def _close_app(target: Optional[str]) -> Tuple[bool, str]:
 
 
 def _close_by_window(app: Dict[str, Any]) -> Tuple[bool, str]:
+    """Cerrar por ventana usando pygetwindow según window_hints de la app."""
     if gw is None:
         return False, "Instala pygetwindow para controlar ventanas"
 
@@ -493,6 +553,7 @@ def _close_by_window(app: Dict[str, Any]) -> Tuple[bool, str]:
 
 
 def _open_task_manager() -> Tuple[bool, str]:
+    """Abrir el Administrador de tareas (`taskmgr`)."""
     try:
         subprocess.Popen(["taskmgr"])
         return True, "Abriendo Administrador de tareas"
@@ -501,6 +562,10 @@ def _open_task_manager() -> Tuple[bool, str]:
 
 
 def _control_window(target: Optional[str], action: str) -> Tuple[bool, str]:
+    """Minimiza, maximiza o pone en foco la ventana de la app objetivo.
+
+    Prioriza comandos personalizados; si no existen o fallan, utiliza pygetwindow.
+    """
     if not target:
         return False, "¿Qué ventana debo manipular?"
 
@@ -547,6 +612,7 @@ def _control_window(target: Optional[str], action: str) -> Tuple[bool, str]:
 
 
 def _resolve_path_from_app(app: Dict[str, Any]) -> str:
+    """Resolver una ruta candidata desde launch/paths de la app."""
     launch = app.get("launch")
     if isinstance(launch, str) and launch.strip():
         return os.path.expandvars(launch.strip())
@@ -557,6 +623,7 @@ def _resolve_path_from_app(app: Dict[str, Any]) -> str:
 
 
 def _select_process_hint(app: Dict[str, Any]) -> str:
+    """Elegir un nombre/hint representativo de proceso/ventana para UI o logs."""
     exe_name = app.get("exe_name")
     if isinstance(exe_name, str) and exe_name.strip():
         return exe_name.strip()

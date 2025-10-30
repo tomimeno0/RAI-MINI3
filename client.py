@@ -1,10 +1,3 @@
-"""Cliente principal de RAI-MINI.
-
-Escucha la hotword, envía las peticiones al servidor local y ejecuta acciones
-usando un catálogo JSON. Si falta una acción en el catálogo, se apoya en Cohere
-para generar comandos de PowerShell/teclado/ventanas y los persiste.
-"""
-
 from __future__ import annotations
 
 import ctypes
@@ -30,11 +23,18 @@ import speech_recognition as sr
 
 import hud
 from hud import log
+# Comentario general del cliente:
+# - Esta unidad orquesta la interacción entre reconocimiento de voz, atajos de teclado,
+#   control de ventanas y el HUD para feedback al usuario.
+# - También resuelve apertura/cierre de aplicaciones consultando un catálogo JSON.
+# - Cuando es necesario, usa Cohere para sintetizar comandos exactos y los registra.
 
 try:
     import cohere
 except Exception:  # pragma: no cover - dependencia opcional
     cohere = None
+    # Cohere es opcional. Si no está instalado o la importación falla,
+    # las funciones generativas retornarán None y el sistema seguirá operativo.
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -56,6 +56,13 @@ memoria_redaccion: Dict[str, Any] = {
 }
 USER32 = ctypes.windll.user32
 KERNEL32 = ctypes.windll.kernel32
+"""
+Notas sobre configuración:
+- CATALOGO_PATH: ruta del catálogo JSON con apps/acciones.
+- COHERE_LOG_PATH: ruta donde se registran prompts y respuestas de Cohere para depuración.
+- COHERE_API_KEY/COHERE_MODEL: controlan el cliente Cohere; si la API Key falta, no se usa Cohere.
+- historial_acciones: último puñado de acciones efectuadas, útil para auditoría en tiempo de ejecución.
+"""
 
 follow_up_mode = False
 follow_up_lock = threading.Lock()
@@ -76,6 +83,7 @@ FOLLOW_UP_EXIT_FRASES = {
 
 
 def _normalizar(texto: str) -> str:
+    """Minusculiza y colapsa espacios múltiples a uno para comparar frases."""
     return re.sub(r"\s+", " ", texto.strip().lower())
 
 
@@ -87,6 +95,8 @@ def _sin_acentos(texto: str) -> str:
 
 
 ATAJOS_VOZ: List[Dict[str, Any]] = [
+    # Tabla de atajos por voz: patrones de regex en español mapeados a combinaciones de teclas.
+    # Cada entrada incluye: id, descripcion, combos (tuplas de teclas) y patrones de activación.
     {
         "id": "mostrar_escritorio",
         "descripcion": "Mostrando el escritorio.",
@@ -310,10 +320,14 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
     },
 ]
 
-ATAJOS_IDS: Dict[str, Dict[str, Any]] = {atajo["id"]: atajo for atajo in ATAJOS_VOZ}
+ATAJOS_IDS: Dict[str, Dict[str, Any]] = {atajo["id"]: atajo for atajo in ATAJOS_VOZ}  # Índice rápido por id.
 
 
 def _asegurar_catalogo_unlocked() -> Dict[str, Any]:
+    """Carga el catálogo desde disco a caché si no está cargado.
+
+    No usa locks; el llamador externo (asegurar_catalogo/cargar_catalogo) maneja sincronización.
+    """
     global _catalogo_cache
     if _catalogo_cache is None:
         try:
@@ -331,6 +345,7 @@ def _asegurar_catalogo_unlocked() -> Dict[str, Any]:
 
 
 def _guardar_catalogo_unlocked(catalogo: Dict[str, Any]) -> None:
+    """Guarda de forma atómica el catálogo (write a tmp + replace)."""
     tmp_path = CATALOGO_PATH.with_suffix(".tmp")
     try:
         tmp_path.write_text(json.dumps(catalogo, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -346,6 +361,7 @@ def _guardar_catalogo_unlocked(catalogo: Dict[str, Any]) -> None:
 
 
 def registrar_accion(accion: Dict[str, Any]) -> None:
+    """Añade la acción al historial en formato serializable (combos como listas de strings)."""
     accion_copia = dict(accion)
     if "combos" in accion_copia:
         combos_guardar: List[List[str]] = []
@@ -362,16 +378,19 @@ def registrar_accion(accion: Dict[str, Any]) -> None:
 
 
 def _reiniciar_memoria_redaccion(texto: str, solicitud: str) -> None:
+    """Inicializa la memoria de redacción con un texto base y su solicitud original."""
     memoria_redaccion["texto"] = texto.strip()
     memoria_redaccion["solicitud"] = solicitud.strip()
     memoria_redaccion["instrucciones"] = []
 
 
 def _actualizar_texto_memoria(texto: str) -> None:
+    """Sobrescribe el texto actual en memoria de redacción."""
     memoria_redaccion["texto"] = texto.strip()
 
 
 def _agregar_instruccion_memoria(instruccion: str) -> None:
+    """Añade una instrucción (pedido adicional) manteniendo un máximo de 5 entradas."""
     instruccion_limpia = (instruccion or "").strip()
     if not instruccion_limpia:
         return
@@ -385,6 +404,7 @@ def _agregar_instruccion_memoria(instruccion: str) -> None:
 
 
 def _obtener_instrucciones_memoria() -> List[str]:
+    """Devuelve la lista de instrucciones adicionales limpias (sin vacíos)."""
     instrucciones = memoria_redaccion.get("instrucciones")
     if isinstance(instrucciones, list):
         return [str(instr).strip() for instr in instrucciones if str(instr).strip()]
@@ -392,9 +412,11 @@ def _obtener_instrucciones_memoria() -> List[str]:
 
 
 def _hay_redaccion_en_memoria() -> bool:
+    """Indica si hay texto en memoria para intentar ajustes/redacción incremental."""
     return bool(str(memoria_redaccion.get("texto") or "").strip())
 
 def _log_cohere_event(titulo: str, contenido: str) -> None:
+    """Anexa un bloque de log sobre interacción con Cohere en cohere.log (best-effort)."""
     marca = datetime.datetime.now().isoformat(timespec="seconds")
     linea = f"[{marca}] {titulo}\n{contenido}\n{'-' * 60}\n"
     try:
@@ -405,11 +427,13 @@ def _log_cohere_event(titulo: str, contenido: str) -> None:
 
 
 def cargar_catalogo() -> Dict[str, Any]:
+    """Devuelve el catálogo en memoria, cargándolo si es necesario (thread-safe)."""
     with catalogo_lock:
         return _asegurar_catalogo_unlocked()
 
 
 def asegurar_catalogo() -> None:
+    """Garantiza que exista un archivo de catálogo en disco (crea uno vacío si no existe)."""
     with catalogo_lock:
         catalogo = _asegurar_catalogo_unlocked()
         if not CATALOGO_PATH.exists():
@@ -417,6 +441,7 @@ def asegurar_catalogo() -> None:
 
 
 def obtener_cliente_cohere() -> Optional["cohere.Client"]:
+    """Inicializa perezosamente el cliente Cohere si hay API Key y dependencia disponible."""
     global _cohere_client
     if cohere is None:
         logger.debug("Cohere no está instalado; omito generación asistida.")
@@ -437,6 +462,7 @@ def obtener_cliente_cohere() -> Optional["cohere.Client"]:
 
 
 def _componer_contexto_catalogo(catalogo: Dict[str, Any], app_obj: Optional[Dict[str, Any]] = None) -> str:
+    """Construye un texto JSON compacto con datos relevantes para orientar a Cohere."""
     bloques: List[str] = []
     if app_obj:
         detalles = {
@@ -452,6 +478,7 @@ def _componer_contexto_catalogo(catalogo: Dict[str, Any], app_obj: Optional[Dict
 
 
 def _extraer_json(texto: str) -> Optional[Dict[str, Any]]:
+    """Intenta encontrar y parsear un objeto JSON embebido en un texto arbitrario."""
     match = re.search(r"\{.*\}", texto, re.DOTALL)
     if not match:
         return None
@@ -462,6 +489,7 @@ def _extraer_json(texto: str) -> Optional[Dict[str, Any]]:
 
 
 def _extraer_comandos_desde_texto(texto: str) -> List[str]:
+    """Parsea líneas de comandos desde un texto, tolerando formatos comunes de respuesta."""
     if not texto:
         return []
 
@@ -594,6 +622,11 @@ def generar_comandos_con_cohere(
     contexto_app: Optional[Dict[str, Any]] = None,
     catalogo_actual: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
+    """Pide a Cohere comandos ejecutables para Windows y los parsea a lista.
+
+    - Retorna {"comandos": List[str], "descripcion": str} o None si no hay respuesta utilizable.
+    - Registra prompts y respuestas en COHERE_LOG_PATH para depurar.
+    """
     cliente = obtener_cliente_cohere()
     if not cliente:
         return None
@@ -685,6 +718,7 @@ def generar_comandos_con_cohere(
 
 
 def generar_respuesta_con_cohere(mensaje: str) -> Optional[str]:
+    """Obtiene una respuesta conversacional breve en español rioplatense usando Cohere."""
     cliente = obtener_cliente_cohere()
     if not cliente:
         return None
@@ -731,6 +765,7 @@ def generar_respuesta_con_cohere(mensaje: str) -> Optional[str]:
 
 
 def generar_redaccion_desde_memoria(nueva_instruccion: str) -> Optional[str]:
+    """Ajusta/redacta un texto ya almacenado en memoria según un pedido adicional."""
     texto_actual = str(memoria_redaccion.get("texto") or "").strip()
     if not texto_actual:
         return None
@@ -788,6 +823,7 @@ def generar_redaccion_desde_memoria(nueva_instruccion: str) -> Optional[str]:
 
 
 def _buscar_app(catalogo: Dict[str, Any], nombre_app: str) -> Optional[Dict[str, Any]]:
+    """Busca una app por nombre/id/alias con comparación flexible (normalizada)."""
     objetivo = _normalizar(nombre_app)
     for app in catalogo.get("aplicaciones", []):
         candidatos = [
@@ -808,13 +844,14 @@ def _buscar_app(catalogo: Dict[str, Any], nombre_app: str) -> Optional[Dict[str,
 
 
 def buscar_comando_por_nombre(nombre_app: str) -> Optional[tuple[str, str, str]]:
+    """Devuelve (nombre, comando, tipo) para abrir una app conocida, o None si no hay definición."""
     catalogo = cargar_catalogo()
     app = _buscar_app(catalogo, nombre_app)
     if not app:
         return None
     acciones = app.get("acciones") or {}
     if not isinstance(acciones, dict):
-        acciones = {}
+        acciones = {} 
     comando = acciones.get("abrir") or app.get("launch") or app.get("comando")
     if not comando:
         return None
@@ -824,6 +861,7 @@ def buscar_comando_por_nombre(nombre_app: str) -> Optional[tuple[str, str, str]]
 
 
 def escaner_inteligente(tipo: str) -> None:
+    """Imprime en logs diagnósticos de RAM/CPU/Discos usando psutil según el tipo solicitado."""
     try:
         if tipo == "ram":
             procesos = sorted(

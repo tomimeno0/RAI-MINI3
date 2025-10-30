@@ -14,9 +14,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-BASE_DIR = Path(__file__).parent
-APPS_JSON_PATH = BASE_DIR / "apps.json"
-LOG_PATH = BASE_DIR / "setup.log"
+BASE_DIR = Path(__file__).parent  # Directorio base del proyecto.
+APPS_JSON_PATH = BASE_DIR / "apps.json"  # Salida del catálogo.
+LOG_PATH = BASE_DIR / "setup.log"  # Log del proceso de setup.
 
 RUTAS_EXE = [
     os.environ.get("ProgramFiles", r"C:\Program Files"),
@@ -52,12 +52,14 @@ CARPETAS_POR_DEFECTO = [
 
 
 def escribir_log(mensaje: str) -> None:
+    """Anexa una línea con marca temporal al archivo de log del setup."""
     marca = datetime.now().isoformat(timespec="seconds")
     with LOG_PATH.open("a", encoding="utf-8") as fh:
         fh.write(f"[{marca}] {mensaje}\n")
 
 
 def unique_strings(values: Iterable[Optional[str]]) -> List[str]:
+    """Devuelve lista deduplicada (case-insensitive) preservando orden de primera aparición."""
     vistos = set()
     resultado: List[str] = []
     for valor in values:
@@ -80,6 +82,7 @@ def slugify(texto: str) -> str:
 
 
 def reservar_id(nombre: str, tipo: str, existentes: Dict[str, Dict[str, object]]) -> str:
+    """Crea un id único con sufijos numéricos si hay colisiones."""
     base = slugify(f"{nombre}_{tipo}")
     candidato = base
     contador = 2
@@ -90,6 +93,7 @@ def reservar_id(nombre: str, tipo: str, existentes: Dict[str, Dict[str, object]]
 
 
 def es_ejecutable_valido(ruta_completa: str) -> bool:
+    """Filtro heurístico para considerar solo ejecutables de interés del usuario."""
     ruta = Path(ruta_completa)
     nombre = ruta.name.lower()
     if not nombre.endswith(".exe"):
@@ -102,6 +106,7 @@ def es_ejecutable_valido(ruta_completa: str) -> bool:
 
 
 def escanear_apps_exe() -> List[Dict[str, str]]:
+    """Explora rutas estándar en busca de .exe plausibles y arma registros básicos."""
     resultados: List[Dict[str, str]] = []
     for ruta_base in RUTAS_EXE:
         if not ruta_base or not os.path.exists(ruta_base):
@@ -119,6 +124,7 @@ def escanear_apps_exe() -> List[Dict[str, str]]:
 
 
 def escanear_paquetes_store() -> Dict[str, Dict[str, Optional[str]]]:
+    """Consulta AppxPackage y devuelve un mapa de familia -> info útil (instalación/origen)."""
     comando_powershell = r"""
     $ErrorActionPreference = "SilentlyContinue"
     Get-AppxPackage | Select-Object Name, PackageFamilyName, InstallLocation, SignatureKind | ConvertTo-Json -Depth 3 -Compress
@@ -155,6 +161,7 @@ def escanear_paquetes_store() -> Dict[str, Dict[str, Optional[str]]]:
 
 
 def escanear_apps_uwp() -> List[Dict[str, str]]:
+    """Lista apps UWP con su AppUserModelID y compone comando explorer.exe apropiado."""
     comando_powershell = r"""
     $ErrorActionPreference = "SilentlyContinue"
     $apps = Get-StartApps
@@ -225,6 +232,7 @@ def registrar_app(
     aliases: Optional[Iterable[str]] = None,
     window_hints: Optional[Iterable[str]] = None,
 ) -> Dict[str, object]:
+    """Registra en el catálogo una app EXE/UWP con campos normalizados y acciones por defecto."""
     app_id = reservar_id(nombre, tipo, catalogo)
     base_aliases = list(aliases) if aliases else []
     base_aliases.extend([nombre, app_id])
@@ -247,6 +255,7 @@ def registrar_app(
 
 
 def buscar_por_nombre(catalogo: Dict[str, Dict[str, object]], nombre: str) -> Optional[Dict[str, object]]:
+    """Búsqueda exacta por nombre principal o cualquiera de los aliases."""
     objetivo = nombre.lower()
     for app in catalogo.values():
         principal = str(app.get("nombre", "")).lower()
@@ -259,6 +268,7 @@ def buscar_por_nombre(catalogo: Dict[str, Dict[str, object]], nombre: str) -> Op
 
 
 def generar_catalogo() -> Dict[str, object]:
+    """Genera el catálogo combinando resultados de escaneo EXE y UWP; agrega acciones típicas."""
     catalogo: Dict[str, Dict[str, object]] = {}
 
     apps_exe = escanear_apps_exe()
@@ -310,6 +320,7 @@ def generar_catalogo() -> Dict[str, object]:
 
 
 def calcular_hash_sha256(ruta: Path, bloque: int = 65536) -> Optional[str]:
+    """Hash SHA-256 de un archivo (retorna None en errores de IO)."""
     sha256 = hashlib.sha256()
     try:
         with ruta.open("rb") as fh:
@@ -324,6 +335,7 @@ def calcular_hash_sha256(ruta: Path, bloque: int = 65536) -> Optional[str]:
 
 
 def listar_archivos(base: Path, calcular_hash: bool = False) -> List[Dict[str, object]]:
+    """Recorre recursivamente y retorna metadatos; puede anexar hash en paralelo."""
     registros: List[Dict[str, object]] = []
     for root, _, files in os.walk(base, topdown=True):
         for nombre in files:
@@ -351,6 +363,7 @@ def listar_archivos(base: Path, calcular_hash: bool = False) -> List[Dict[str, o
 
 
 def escanear_archivos(calcular_hash: bool = False) -> List[Dict[str, object]]:
+    """Escanea carpetas del usuario y añade pseudo-entradas para apps de la tienda."""
     inventario: Dict[str, Dict[str, object]] = {}
     for carpeta in CARPETAS_POR_DEFECTO:
         ruta = Path(carpeta).expanduser()
@@ -379,10 +392,12 @@ def escanear_archivos(calcular_hash: bool = False) -> List[Dict[str, object]]:
 
 
 def guardar_json(path: Path, data: object) -> None:
+    """Serializa a JSON con indentación y UTF-8 (sin escapar acentos/ñ)."""
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main() -> None:
+    """Punto de entrada: genera y persiste apps.json; escribe log de finalización."""
     LOG_PATH.write_text("", encoding="utf-8")
     print("Generando catálogo de aplicaciones...")
     catalogo = generar_catalogo()
