@@ -12,6 +12,15 @@ out/
 .env.local
 .env.*.local
 
+# Python dependencies
+__pycache__/
+*.pyc
+venv/
+env/
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+
 # OS generated files
 .DS_Store
 Thumbs.db

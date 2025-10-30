@@ -1,8 +1,12 @@
-import customtkinter as ctk
-from queue import Queue
-import time
+import ctypes
+import sys
 import threading
+import time
 from pathlib import Path
+from queue import Queue
+
+import customtkinter as ctk
+import tkinter as tk
 try:
     import winsound
 except ImportError:
@@ -16,10 +20,25 @@ msg_queue = Queue()
 
 root = None
 frame = None
+content_frame = None
 bubble_label = None
 hud_visible = False
 texto_acumulado = ""
 _SOUND_FILE = Path(__file__).with_name("notify.wav")
+ICON_FILE = Path(__file__).with_name("RAI_option_A.ico")
+ICON_PNG_FALLBACK = Path(__file__).with_name("optionA_1024.png")
+APP_USER_MODEL_ID = "RAI.MINI.HUD"
+
+TRANSPARENT_COLOR = "#010101"
+HUD_BACKGROUND_COLOR = "#0b1324"
+HUD_BORDER_RADIUS = 28
+HUD_BORDER_WIDTH = 3
+HUD_PADDING = 14
+CONTENT_PADDING = 20
+HUD_MAX_CHARS = 70
+
+window_icon_photo = None
+icon_handles: list[int] = []
 
 def _play_sound(fallback_alias: str) -> None:
     if winsound is None:
@@ -31,6 +50,138 @@ def _play_sound(fallback_alias: str) -> None:
             winsound.PlaySound(fallback_alias, winsound.SND_ALIAS | winsound.SND_ASYNC)
     except Exception:
         pass
+
+
+def _ensure_app_user_model_id() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(ctypes.c_wchar_p(APP_USER_MODEL_ID))
+    except Exception:
+        pass
+
+
+def _apply_window_icon(window: ctk.CTk | None) -> None:
+    if window is None:
+        return
+    icon_path = ICON_FILE if ICON_FILE.exists() else None
+    fallback_image = ICON_PNG_FALLBACK if ICON_PNG_FALLBACK.exists() else None
+
+    applied = False
+    if icon_path:
+        try:
+            window.iconbitmap(str(icon_path))
+            applied = True
+        except Exception:
+            pass
+        if sys.platform == "win32":
+            try:
+                handle = window.winfo_id()
+                IMAGE_ICON = 1
+                LR_LOADFROMFILE = 0x00000010
+                LR_DEFAULTSIZE = 0x00000040
+                hicon_big = ctypes.windll.user32.LoadImageW(
+                    0,
+                    str(icon_path),
+                    IMAGE_ICON,
+                    0,
+                    0,
+                    LR_LOADFROMFILE | LR_DEFAULTSIZE,
+                )
+                hicon_small = ctypes.windll.user32.LoadImageW(
+                    0,
+                    str(icon_path),
+                    IMAGE_ICON,
+                    32,
+                    32,
+                    LR_LOADFROMFILE | LR_DEFAULTSIZE,
+                )
+                if hicon_big:
+                    ctypes.windll.user32.SendMessageW(handle, 0x0080, 1, hicon_big)
+                    icon_handles.append(hicon_big)
+                if hicon_small:
+                    ctypes.windll.user32.SendMessageW(handle, 0x0080, 0, hicon_small)
+                    icon_handles.append(hicon_small)
+                if hicon_big or hicon_small:
+                    applied = True
+            except Exception:
+                pass
+
+    if not applied and fallback_image:
+        global window_icon_photo
+        try:
+            window_icon_photo = tk.PhotoImage(file=str(fallback_image))
+            window.iconphoto(True, window_icon_photo)
+            window.iconbitmap("@" + str(fallback_image))
+        except Exception:
+            window_icon_photo = None
+
+
+def _apply_console_icon() -> None:
+    if sys.platform != "win32" or not ICON_FILE.exists():
+        return
+    try:
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if not hwnd:
+            return
+        IMAGE_ICON = 1
+        LR_LOADFROMFILE = 0x00000010
+        LR_DEFAULTSIZE = 0x00000040
+        icon_path = str(ICON_FILE)
+        hicon_big = ctypes.windll.user32.LoadImageW(
+            0,
+            icon_path,
+            IMAGE_ICON,
+            0,
+            0,
+            LR_LOADFROMFILE | LR_DEFAULTSIZE,
+        )
+        hicon_small = ctypes.windll.user32.LoadImageW(
+            0,
+            icon_path,
+            IMAGE_ICON,
+            32,
+            32,
+            LR_LOADFROMFILE | LR_DEFAULTSIZE,
+        )
+        if hicon_big:
+            ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 1, hicon_big)
+            icon_handles.append(hicon_big)
+        if hicon_small:
+            ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 0, hicon_small)
+            icon_handles.append(hicon_small)
+    except Exception:
+        pass
+
+
+def _limit_text(texto):
+    if not isinstance(texto, str):
+        return ""
+    texto = texto.strip()
+    if len(texto) <= HUD_MAX_CHARS:
+        return texto
+    if HUD_MAX_CHARS <= 3:
+        return texto[:HUD_MAX_CHARS]
+    recortado = texto[: HUD_MAX_CHARS - 3].rstrip()
+    return f"{recortado}..."
+
+
+def _update_frame_layout(width: int, height: int) -> None:
+    if frame is None:
+        return
+    interior_w = max(0, width - 2 * HUD_PADDING)
+    interior_h = max(0, height - 2 * HUD_PADDING)
+    frame.place(x=HUD_PADDING, y=HUD_PADDING)
+    frame.configure(width=interior_w, height=interior_h)
+
+    inner_w = max(0, interior_w - 2 * CONTENT_PADDING)
+    inner_h = max(0, interior_h - 2 * CONTENT_PADDING)
+    if content_frame is not None:
+        content_frame.place(x=CONTENT_PADDING, y=CONTENT_PADDING)
+        content_frame.configure(width=inner_w, height=inner_h)
+    if bubble_label is not None:
+        wrap = max(40, inner_w)
+        bubble_label.configure(wraplength=wrap, width=inner_w, height=inner_h)
 
 ANCHO = 420
 ALTO_NORMAL = 120
@@ -83,10 +234,11 @@ def ejecutar_comando_desde_ui(texto: str) -> None:
     threading.Thread(target=_worker, args=(texto.strip(),), daemon=True).start()
 
 def set_estado(estado, texto):
-    if bubble_label:
+    if bubble_label and frame:
         color = estado_colores.get(estado, "#888")
         icono = estado_iconos.get(estado, "")
-        bubble_label.configure(text=f"{icono} {texto}")
+        mensaje = f"{icono} {texto}".strip()
+        bubble_label.configure(text=_limit_text(mensaje))
         frame.configure(border_color=color)
 
 def actualizar_texto():
@@ -135,6 +287,8 @@ def iniciar_hud():
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
 
+    _ensure_app_user_model_id()
+    _apply_console_icon()
     root = ctk.CTk()
     root.overrideredirect(True)
     screen_width = root.winfo_screenwidth()
@@ -149,6 +303,7 @@ def iniciar_hud():
     root.resizable(False, False)
     root.configure(bg="black")
     root.attributes("-alpha", 0)
+    _apply_window_icon(root)
 
     frame = ctk.CTkFrame(
         root,
@@ -223,7 +378,7 @@ def mostrar(texto=None, es_expansivo=False, after=None, es_bienvenida=False):
         fade_in()
 
         if texto:
-            set_texto_animado(texto, estado="procesando", after=after)
+            set_texto_animado(_limit_text(texto), estado="procesando", after=after)
 
 
 def ocultar():
@@ -254,6 +409,7 @@ def ocultar():
 
 
 def set_texto_animado(texto, delay=0.03, estado="procesando", after=None):
+    texto = _limit_text(texto)
     def escribir():
         global texto_acumulado
         with typing_lock:
@@ -285,6 +441,7 @@ def mostrar_respuesta_final(texto):
     global hud_visible
     hud_visible = True
 
+    texto = _limit_text(texto)
     altura_calculada = calcular_altura_requerida(texto, ANCHO)
     altura_final = min(max(ALTO_NORMAL, altura_calculada), 480)
 
@@ -317,6 +474,7 @@ def mostrar_respuesta_final(texto):
 
 
 def calcular_altura_requerida(texto, ancho, fuente=("SF Pro Display", 19)):
+    texto = _limit_text(texto)
     dummy = TkLabel(root, text=texto, font=fuente, wraplength=ancho - 40, justify="left")
     dummy.update_idletasks()
     return dummy.winfo_reqheight() + 40  # margen superior + inferior

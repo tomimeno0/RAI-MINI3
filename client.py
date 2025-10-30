@@ -1,13 +1,12 @@
-﻿"""Cliente principal de RAI-MINI.
+"""Cliente principal de RAI-MINI.
 
-Escucha la hotword, envÃ­a las peticiones al servidor local y ejecuta acciones
-usando un catÃ¡logo JSON. Si falta una acciÃ³n en el catÃ¡logo, se apoya en Cohere
+Escucha la hotword, envía las peticiones al servidor local y ejecuta acciones
+usando un catálogo JSON. Si falta una acción en el catálogo, se apoya en Cohere
 para generar comandos de PowerShell/teclado/ventanas y los persiste.
 """
 
 from __future__ import annotations
 
-import csv
 import ctypes
 import datetime
 import json
@@ -31,8 +30,6 @@ import speech_recognition as sr
 
 import hud
 from hud import log
-import scheduler
-import system_controls
 
 try:
     import cohere
@@ -46,9 +43,7 @@ usuario = os.getlogin()
 texto_acumulado = ""
 CATALOGO_PATH = Path(__file__).with_name("apps.json")
 COHERE_LOG_PATH = Path(__file__).with_name("cohere.log")
-ORDENES_LOG_PATH = Path(__file__).resolve().parent / "logs" / "ordenes.csv"
 catalogo_lock = threading.Lock()
-ordenes_lock = threading.Lock()
 _catalogo_cache: Optional[Dict[str, Any]] = None
 COHERE_MODEL = os.getenv("COHERE_MODEL", "command-r-plus-08-2024")
 COHERE_API_KEY = "ppBVjJhTQ1vCU7WVBKt1wYKpDUZW97LhZ1PrHsBJ"
@@ -64,11 +59,11 @@ KERNEL32 = ctypes.windll.kernel32
 
 follow_up_mode = False
 follow_up_lock = threading.Lock()
-FOLLOW_UP_PROMPT = "Â¿NecesitÃ¡s algo mÃ¡s?"
+FOLLOW_UP_PROMPT = "¿Necesitás algo más?"
 FOLLOW_UP_EXIT_FRASES = {
     "nada",
     "nada mas",
-    "nada mÃ¡s",
+    "nada más",
     "no",
     "no gracias",
     "gracias",
@@ -76,7 +71,7 @@ FOLLOW_UP_EXIT_FRASES = {
     "estoy bien",
     "eso es todo",
     "seria todo",
-    "serÃ­a todo",
+    "sería todo",
 }
 
 
@@ -120,7 +115,7 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
     },
     {
         "id": "cerrar_pestana",
-        "descripcion": "Cerrando la pestaÃ±a.",
+        "descripcion": "Cerrando la pestaña.",
         "combos": [("ctrl", "w")],
         "patrones": [
             r"\b(cierra|cerrame|cerrar)\s+(la\s+)?pestana\b",
@@ -129,7 +124,7 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
     },
     {
         "id": "nueva_pestana",
-        "descripcion": "Abriendo una nueva pestaÃ±a.",
+        "descripcion": "Abriendo una nueva pestaña.",
         "combos": [("ctrl", "t")],
         "patrones": [
             r"\b(nueva|abrir)\s+(pestana|pestania)\b",
@@ -137,10 +132,10 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
     },
     {
         "id": "reabrir_pestana",
-        "descripcion": "Reabriendo la Ãºltima pestaÃ±a.",
+        "descripcion": "Reabriendo la última pestaña.",
         "combos": [("ctrl", "shift", "t")],
         "patrones": [
-            r"\b(reabrir|recupera|volver a abrir)\s+(la\s+)?(ultima|Ãºltima)\s+pestana\b",
+            r"\b(reabrir|recupera|volver a abrir)\s+(la\s+)?(ultima|última)\s+pestana\b",
         ],
     },
     {
@@ -153,7 +148,7 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
     },
     {
         "id": "ventana_incognita",
-        "descripcion": "Abriendo una ventana de incÃ³gnito.",
+        "descripcion": "Abriendo una ventana de incógnito.",
         "combos": [("ctrl", "shift", "n")],
         "patrones": [
             r"\b(incognito|incognita|privada)\b",
@@ -188,7 +183,7 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
     },
     {
         "id": "grabar_pantalla",
-        "descripcion": "Alternando grabaciÃ³n de pantalla.",
+        "descripcion": "Alternando grabación de pantalla.",
         "combos": [("winleft", "alt", "r")],
         "patrones": [
             r"\b(grabar|graba|grabame)\s+(la\s+)?pantalla\b",
@@ -197,7 +192,7 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
     },
     {
         "id": "mostrar_busqueda",
-        "descripcion": "Abriendo la bÃºsqueda.",
+        "descripcion": "Abriendo la búsqueda.",
         "combos": [("winleft", "s")],
         "patrones": [
             r"\b(abrir|abre)\s+(la\s+)?busqueda\b",
@@ -224,7 +219,7 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
     },
     {
         "id": "copiar",
-        "descripcion": "Copiando selecciÃ³n.",
+        "descripcion": "Copiando selección.",
         "combos": [("ctrl", "c")],
         "patrones": [
             r"\b(copia|copiame|copialo|copiar)\b",
@@ -235,13 +230,13 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
         "descripcion": "Pegando.",
         "combos": [("ctrl", "v")],
         "patrones": [
-            r"\b(peg(a|Ã¡|ame|alo)|pegar)\b",
+            r"\b(peg(a|á|ame|alo)|pegar)\b",
             r"\b(pega\s+lo\b)",
         ],
     },
     {
         "id": "cortar",
-        "descripcion": "Cortando selecciÃ³n.",
+        "descripcion": "Cortando selección.",
         "combos": [("ctrl", "x")],
         "patrones": [
             r"\b(corta|cortame|cortalo|cortar)\b",
@@ -249,27 +244,27 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
     },
     {
         "id": "deshacer",
-        "descripcion": "Deshaciendo la Ãºltima acciÃ³n.",
+        "descripcion": "Deshaciendo la última acción.",
         "combos": [("ctrl", "z")],
         "patrones": [
-            r"\b(deshac(e|Ã©)|deshacelo|deshacer)\b",
+            r"\b(deshac(e|é)|deshacelo|deshacer)\b",
         ],
     },
     {
         "id": "rehacer",
-        "descripcion": "Rehaciendo la acciÃ³n.",
+        "descripcion": "Rehaciendo la acción.",
         "combos": [("ctrl", "y"), ("ctrl", "shift", "z")],
         "patrones": [
-            r"\b(rehac(e|Ã©)|rehacelo|repeti|repetÃ­)\b",
+            r"\b(rehac(e|é)|rehacelo|repeti|repetí)\b",
         ],
     },
     {
         "id": "buscar_en_pantalla",
-        "descripcion": "Buscando en la pÃ¡gina.",
+        "descripcion": "Buscando en la página.",
         "combos": [("ctrl", "f")],
         "patrones": [
-            r"\b(busca|buscar)\s+(en\s+la\s+)?p[Ã¡a]gina\b",
-            r"\b(encontr(a|Ã¡|ame)|encontrar)\b",
+            r"\b(busca|buscar)\s+(en\s+la\s+)?p[áa]gina\b",
+            r"\b(encontr(a|á|ame)|encontrar)\b",
         ],
     },
     {
@@ -290,10 +285,10 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
     },
     {
         "id": "imprimir",
-        "descripcion": "Abriendo la impresiÃ³n.",
+        "descripcion": "Abriendo la impresión.",
         "combos": [("ctrl", "p")],
         "patrones": [
-            r"\b(imprim(e|Ã©)|imprimir|impresi[oÃ³]n)\b",
+            r"\b(imprim(e|é)|imprimir|impresi[oó]n)\b",
         ],
     },
     {
@@ -301,7 +296,7 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
         "descripcion": "Abriendo archivo.",
         "combos": [("ctrl", "o")],
         "patrones": [
-            r"\b(abr(i|Ã­)|abrime)\s+archivo\b",
+            r"\b(abr(i|í)|abrime)\s+archivo\b",
             r"\b(abrir)\s+un\s+archivo\b",
         ],
     },
@@ -310,7 +305,7 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
         "descripcion": "Actualizando la ventana.",
         "combos": [("f5",)],
         "patrones": [
-            r"\b(actualiza|actualiz[a|Ã¡]lo|refresca|recarga)\b",
+            r"\b(actualiza|actualiz[a|á]lo|refresca|recarga)\b",
         ],
     },
 ]
@@ -327,7 +322,7 @@ def _asegurar_catalogo_unlocked() -> Dict[str, Any]:
         except FileNotFoundError:
             _catalogo_cache = {"aplicaciones": []}
         except Exception as exc:
-            logger.error(f"No pude cargar el catÃ¡logo JSON: {exc}")
+            logger.error(f"No pude cargar el catálogo JSON: {exc}")
             _catalogo_cache = {"aplicaciones": []}
     aplicaciones = _catalogo_cache.get("aplicaciones")
     if not isinstance(aplicaciones, list):
@@ -364,418 +359,6 @@ def registrar_accion(accion: Dict[str, Any]) -> None:
     logger.debug("Historial actualizado con: %s", accion_copia)
 
 
-
-
-def _ensure_logs_dir() -> None:
-    try:
-        ORDENES_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    except Exception as exc:
-        logger.warning("No pude crear la carpeta de logs: %s", exc)
-
-
-def _log_voice_command(
-    texto_original: str,
-    intent: str,
-    params: Dict[str, Any],
-    resultado: str,
-    error: Optional[str] = None,
-) -> None:
-    _ensure_logs_dir()
-    registro = {
-        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
-        "texto_original": texto_original,
-        "intent": intent,
-        "params": json.dumps(params, ensure_ascii=False, sort_keys=True),
-        "resultado": resultado,
-        "error": error or "",
-    }
-    with ordenes_lock:
-        es_nuevo = not ORDENES_LOG_PATH.exists()
-        with ORDENES_LOG_PATH.open("a", encoding="utf-8", newline="") as fh:
-            writer = csv.DictWriter(
-                fh,
-                fieldnames=["timestamp", "texto_original", "intent", "params", "resultado", "error"],
-            )
-            if es_nuevo:
-                writer.writeheader()
-            writer.writerow(registro)
-
-
-def _formatear_duracion(segundos: int) -> str:
-    segundos = max(0, int(round(segundos)))
-    if segundos < 60:
-        return f"{segundos} segundo{'s' if segundos != 1 else ''}"
-    minutos, resto = divmod(segundos, 60)
-    if minutos < 60:
-        if resto:
-            return (
-                f"{minutos} minuto{'s' if minutos != 1 else ''} y "
-                f"{resto} segundo{'s' if resto != 1 else ''}"
-            )
-        return f"{minutos} minuto{'s' if minutos != 1 else ''}"
-    horas, minutos = divmod(minutos, 60)
-    partes: List[str] = []
-    if horas:
-        partes.append(f"{horas} hora{'s' if horas != 1 else ''}")
-    if minutos:
-        partes.append(f"{minutos} minuto{'s' if minutos != 1 else ''}")
-    if not partes:
-        partes.append("menos de 1 minuto")
-    return " y ".join(partes)
-
-
-def _descripcion_tarea(task: "scheduler.ScheduledTask") -> str:
-    restante = int(round(task.eta - time.time()))
-    if restante < 0:
-        restante = 0
-    destino = datetime.datetime.fromtimestamp(task.eta)
-    horario = destino.strftime("%H:%M")
-    if task.tipo == "recordatorio":
-        detalle = f"Recordar {task.comando}"
-    elif task.tipo == "shutdown":
-        detalle = "Apagado programado"
-    elif task.tipo == "restart":
-        detalle = "Reinicio programado"
-    else:
-        detalle = task.comando
-    return f"{task.id}: {detalle} (en {_formatear_duracion(restante)}, {horario})"
-
-
-def _on_reminder_trigger(task: "scheduler.ScheduledTask") -> None:
-    mensaje = f"Recordatorio ({task.id}): {task.comando}"
-    hud.log(mensaje)
-    registrar_accion({"tipo": "recordatorio", "id": task.id, "texto": task.comando, "estado": "disparado"})
-    _log_voice_command(
-        f"[recordatorio:{task.id}]",
-        "recordatorio_disparado",
-        {"id": task.id, "texto": task.comando},
-        mensaje,
-    )
-    notificar_y_activar_follow_up(mensaje)
-
-
-def handle_voice_command(texto: str) -> bool:
-    original = texto.strip()
-    if not original:
-        return False
-
-    limpio = _sin_acentos(original)
-
-    brillo_abs = re.search(r"\bbrillo(?:\s+(?:al|a|en))?\s+(\d{1,3})\s*%?", limpio)
-    if brillo_abs:
-        valor_bruto = brillo_abs.group(1)
-        try:
-            valor = system_controls.normalize_percent(valor_bruto)
-            aplicado = system_controls.set_brightness(valor)
-            mensaje_ok = f"Brillo ajustado al {aplicado}%."
-            registrar_accion({"tipo": "sistema", "accion": "brillo", "valor": aplicado})
-            _log_voice_command(original, "brillo_set", {"valor": aplicado}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude ajustar el brillo: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "brillo_set", {"valor": valor_bruto}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    if re.search(r"\bsubi[r]?\s+el\s+brillo\b", limpio) and not re.search(r"\bsubi[r]?\s+el\s+brillo.*\d", limpio):
-        try:
-            actual = system_controls.get_brightness()
-            base = actual if actual is not None else 60
-            objetivo = system_controls.normalize_percent(base + 10)
-            aplicado = system_controls.set_brightness(objetivo)
-            mensaje_ok = f"SubÃ­ el brillo al {aplicado}%."
-            registrar_accion({"tipo": "sistema", "accion": "brillo", "valor": aplicado, "modo": "subir"})
-            _log_voice_command(original, "brillo_up", {"valor": aplicado}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude subir el brillo: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "brillo_up", {}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    if re.search(r"\bbaja\s+el\s+brillo\b", limpio) and not re.search(r"\bbaja\s+el\s+brillo.*\d", limpio):
-        try:
-            actual = system_controls.get_brightness()
-            base = actual if actual is not None else 40
-            objetivo = system_controls.normalize_percent(base - 10)
-            aplicado = system_controls.set_brightness(objetivo)
-            mensaje_ok = f"BajÃ© el brillo al {aplicado}%."
-            registrar_accion({"tipo": "sistema", "accion": "brillo", "valor": aplicado, "modo": "bajar"})
-            _log_voice_command(original, "brillo_down", {"valor": aplicado}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude bajar el brillo: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "brillo_down", {}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    volumen_delta = re.search(r"subi[r]?\s+el\s+volumen(?:\s+en)?\s+(\d{1,3})\s*%?", limpio)
-    if volumen_delta:
-        delta = volumen_delta.group(1)
-        try:
-            final = system_controls.volume_up(delta)
-            mensaje_ok = f"Volumen al {final}%."
-            registrar_accion({"tipo": "sistema", "accion": "volumen", "valor": final, "modo": "subir", "delta": int(delta)})
-            _log_voice_command(original, "volumen_up", {"delta": int(delta), "valor": final}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude subir el volumen: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "volumen_up", {"delta": delta}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    volumen_delta_down = re.search(r"baja\s+el\s+volumen(?:\s+en)?\s+(\d{1,3})\s*%?", limpio)
-    if volumen_delta_down:
-        delta = volumen_delta_down.group(1)
-        try:
-            final = system_controls.volume_down(delta)
-            mensaje_ok = f"Volumen al {final}%."
-            registrar_accion({"tipo": "sistema", "accion": "volumen", "valor": final, "modo": "bajar", "delta": int(delta)})
-            _log_voice_command(original, "volumen_down", {"delta": int(delta), "valor": final}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude bajar el volumen: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "volumen_down", {"delta": delta}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    volumen_abs = re.search(r"\bvolumen(?:\s+(?:al|a|en))\s+(\d{1,3})\s*%?", limpio)
-    if volumen_abs:
-        valor_bruto = volumen_abs.group(1)
-        try:
-            valor = system_controls.normalize_percent(valor_bruto)
-            aplicado = system_controls.set_volume(valor)
-            mensaje_ok = f"Volumen ajustado al {aplicado}%."
-            registrar_accion({"tipo": "sistema", "accion": "volumen", "valor": aplicado})
-            _log_voice_command(original, "volumen_set", {"valor": aplicado}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude ajustar el volumen: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "volumen_set", {"valor": valor_bruto}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    if re.search(r"\bsubi[r]?\s+el\s+volumen\b", limpio) and not re.search(r"\bsubi[r]?\s+el\s+volumen.*\d", limpio):
-        try:
-            final = system_controls.volume_up(5)
-            mensaje_ok = f"SubÃ­ el volumen al {final}%."
-            registrar_accion({"tipo": "sistema", "accion": "volumen", "valor": final, "modo": "subir", "delta": 5})
-            _log_voice_command(original, "volumen_up", {"delta": 5, "valor": final}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude subir el volumen: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "volumen_up", {"delta": 5}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    if re.search(r"\bbaja\s+el\s+volumen\b", limpio) and not re.search(r"\bbaja\s+el\s+volumen.*\d", limpio):
-        try:
-            final = system_controls.volume_down(5)
-            mensaje_ok = f"BajÃ© el volumen al {final}%."
-            registrar_accion({"tipo": "sistema", "accion": "volumen", "valor": final, "modo": "bajar", "delta": 5})
-            _log_voice_command(original, "volumen_down", {"delta": 5, "valor": final}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude bajar el volumen: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "volumen_down", {"delta": 5}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    if re.search(r"\bdesmutea[r]?\b", limpio):
-        try:
-            if "microfono" in limpio:
-                system_controls.mic_unmute()
-                mensaje_ok = "MicrÃ³fono activado."
-                registrar_accion({"tipo": "sistema", "accion": "microfono", "estado": "activo"})
-                _log_voice_command(original, "mic_unmute", {}, mensaje_ok)
-            else:
-                system_controls.volume_unmute()
-                mensaje_ok = "Volumen restaurado."
-                registrar_accion({"tipo": "sistema", "accion": "volumen", "estado": "sonando"})
-                _log_voice_command(original, "volumen_unmute", {}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude desmutear: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "unmute", {}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    if re.search(r"\bmutea[r]?\b", limpio) or "mute " in limpio:
-        try:
-            if "microfono" in limpio or "micro" in limpio:
-                system_controls.mic_mute()
-                mensaje_ok = "MicrÃ³fono silenciado."
-                registrar_accion({"tipo": "sistema", "accion": "microfono", "estado": "muteado"})
-                _log_voice_command(original, "mic_mute", {}, mensaje_ok)
-            else:
-                system_controls.volume_mute()
-                mensaje_ok = "SilenciÃ© el volumen."
-                registrar_accion({"tipo": "sistema", "accion": "volumen", "estado": "muteado"})
-                _log_voice_command(original, "volumen_mute", {}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude mutear: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "mute", {}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    if re.search(r"\bbloquea[rs]?\s+el\s+microfono\b", limpio):
-        try:
-            system_controls.mic_mute()
-            mensaje_ok = "MicrÃ³fono bloqueado."
-            registrar_accion({"tipo": "sistema", "accion": "microfono", "estado": "bloqueado"})
-            _log_voice_command(original, "mic_mute", {}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude bloquear el micrÃ³fono: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "mic_mute", {}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    if re.search(r"\bdesbloquea\s+el\s+microfono\b", limpio):
-        try:
-            system_controls.mic_unmute()
-            mensaje_ok = "MicrÃ³fono desbloqueado."
-            registrar_accion({"tipo": "sistema", "accion": "microfono", "estado": "desbloqueado"})
-            _log_voice_command(original, "mic_unmute", {}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude desbloquear el micrÃ³fono: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "mic_unmute", {}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    recordatorio = re.search(r"programa[, ]*\s*recordame\s+(.+?)\s+en\s+(.+)", limpio)
-    if recordatorio:
-        tarea_texto = original[recordatorio.start(1):recordatorio.end(1)].strip()
-        duracion_texto = original[recordatorio.start(2):recordatorio.end(2)].strip()
-        try:
-            delay = scheduler.parse_duration(duracion_texto)
-            task = scheduler.program_reminder(tarea_texto, delay, _on_reminder_trigger)
-            hora = datetime.datetime.fromtimestamp(task.eta).strftime("%H:%M")
-            mensaje_ok = f"Recordatorio {task.id} listo para las {hora}."
-            registrar_accion({"tipo": "recordatorio", "id": task.id, "texto": tarea_texto, "delay": delay})
-            _log_voice_command(
-                original,
-                "recordatorio_programado",
-                {"id": task.id, "texto": tarea_texto, "delay": delay},
-                mensaje_ok,
-            )
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude programar el recordatorio: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "recordatorio_programado", {"texto": tarea_texto}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    apagar = re.search(r"programa[, ]*\s*apagar(?: la compu| la computadora)?\s+en\s+(.+)", limpio)
-    if apagar:
-        duracion_texto = original[apagar.start(1):apagar.end(1)].strip()
-        try:
-            delay = scheduler.parse_duration(duracion_texto)
-            task = scheduler.program_shutdown(delay, kind="shutdown")
-            mensaje_ok = f"Apagado {task.id} en {_formatear_duracion(delay)}."
-            registrar_accion({"tipo": "sistema", "accion": "apagado", "delay": delay, "id": task.id})
-            _log_voice_command(
-                original,
-                "shutdown_programado",
-                {"delay": delay, "id": task.id},
-                mensaje_ok,
-            )
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude programar el apagado: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "shutdown_programado", {"texto": duracion_texto}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    reinicio = re.search(r"programa[, ]*\s*reiniciar\s+en\s+(.+)", limpio)
-    if reinicio:
-        duracion_texto = original[reinicio.start(1):reinicio.end(1)].strip()
-        try:
-            delay = scheduler.parse_duration(duracion_texto)
-            task = scheduler.program_shutdown(delay, kind="restart")
-            mensaje_ok = f"Reinicio {task.id} en {_formatear_duracion(delay)}."
-            registrar_accion({"tipo": "sistema", "accion": "reinicio", "delay": delay, "id": task.id})
-            _log_voice_command(
-                original,
-                "restart_programado",
-                {"delay": delay, "id": task.id},
-                mensaje_ok,
-            )
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude programar el reinicio: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "restart_programado", {"texto": duracion_texto}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    if re.search(r"mostra\s+tareas\s+programadas", limpio) or re.search(r"mostr[aÃ¡]\s+tareas\s+programadas", original, re.IGNORECASE):
-        tareas = scheduler.list_tasks()
-        if tareas:
-            resumen = "\n".join(_descripcion_tarea(t) for t in tareas)
-            hud.log(f"Tareas programadas:\n{resumen}")
-            mensaje_ok = "ListÃ© las tareas programadas."
-        else:
-            mensaje_ok = "No hay tareas programadas."
-            hud.log(mensaje_ok)
-        registrar_accion({"tipo": "recordatorio", "accion": "listar", "total": len(tareas)})
-        _log_voice_command(original, "listar_tareas", {"total": len(tareas)}, mensaje_ok)
-        notificar_y_activar_follow_up(mensaje_ok)
-        return True
-
-    cancelar = re.search(r"cancel[aÃ¡]\s+la\s+tarea\s+([a-z0-9]+)", limpio)
-    if cancelar:
-        task_id = cancelar.group(1)
-        try:
-            tarea = scheduler.cancel_task(task_id)
-            mensaje_ok = f"Tarea {task_id} cancelada."
-            registrar_accion({"tipo": tarea.tipo, "accion": "cancelar", "id": task_id})
-            _log_voice_command(original, "cancelar_tarea", {"id": task_id}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude cancelar la tarea {task_id}: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "cancelar_tarea", {"id": task_id}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    if re.search(r"cancela\s+el\s+apagado", limpio):
-        try:
-            scheduler.cancel_shutdown()
-            for tarea in list(scheduler.list_tasks()):
-                if tarea.tipo in {"shutdown", "restart"}:
-                    try:
-                        scheduler.cancel_task(tarea.id)
-                    except Exception:
-                        continue
-            mensaje_ok = "CancelÃ© el apagado."
-            registrar_accion({"tipo": "sistema", "accion": "apagado", "estado": "cancelado"})
-            _log_voice_command(original, "cancelar_apagado", {}, mensaje_ok)
-            notificar_y_activar_follow_up(mensaje_ok)
-        except Exception as exc:
-            error = f"No pude cancelar el apagado: {exc}"
-            hud.log(error)
-            _log_voice_command(original, "cancelar_apagado", {}, "", str(exc))
-            threading.Timer(3, hud.ocultar).start()
-        return True
-
-    return False
 
 
 def _reiniciar_memoria_redaccion(texto: str, solicitud: str) -> None:
@@ -836,14 +419,14 @@ def asegurar_catalogo() -> None:
 def obtener_cliente_cohere() -> Optional["cohere.Client"]:
     global _cohere_client
     if cohere is None:
-        logger.debug("Cohere no estÃ¡ instalado; omito generaciÃ³n asistida.")
+        logger.debug("Cohere no está instalado; omito generación asistida.")
         return None
     if _cohere_client is not None:
         return _cohere_client
 
     api_key = COHERE_API_KEY
     if not api_key:
-        logger.error("COHERE_API_KEY no estÃ¡ configurada en el cÃ³digo.")
+        logger.error("COHERE_API_KEY no está configurada en el código.")
         return None
     try:
         _cohere_client = cohere.Client(api_key)
@@ -864,7 +447,7 @@ def _componer_contexto_catalogo(catalogo: Dict[str, Any], app_obj: Optional[Dict
         }
         bloques.append(json.dumps(detalles, ensure_ascii=False))
     else:
-        bloques.append("(catÃ¡logo deshabilitado)")
+        bloques.append("(catálogo deshabilitado)")
     return "\n".join(bloques)
 
 
@@ -1064,11 +647,11 @@ def generar_comandos_con_cohere(
         elif hasattr(respuesta_chat, "output_text"):
             respuesta_texto = (respuesta_chat.output_text or "").strip()
     except Exception as exc:
-        logger.error(f"Cohere chat fallÃ³: {exc}")
+        logger.error(f"Cohere chat falló: {exc}")
         return None
 
     if not respuesta_texto:
-        logger.warning("Cohere no devolviÃ³ texto.")
+        logger.warning("Cohere no devolvió texto.")
         return None
 
     descripcion = ""
@@ -1106,9 +689,9 @@ def generar_respuesta_con_cohere(mensaje: str) -> Optional[str]:
     if not cliente:
         return None
     instrucciones = (
-        "Eres un asistente conversacional en espaÃ±ol rioplatense. "
-        "Responde de forma breve, cordial y Ãºtil. Evita mencionar que eres una IA. "
-        "Si no tienes contexto suficiente, muestra empatÃ­a y pide aclaraciones."
+        "Eres un asistente conversacional en español rioplatense. "
+        "Responde de forma breve, cordial y útil. Evita mencionar que eres una IA. "
+        "Si no tienes contexto suficiente, muestra empatía y pide aclaraciones. No superes los 70 caracteres por respuesta."
     )
     prompt = f"{instrucciones}\nUsuario: {mensaje.strip()}\nRespuesta:"
     _log_cohere_event("PROMPT_RESPUESTA", prompt)
@@ -1119,7 +702,7 @@ def generar_respuesta_con_cohere(mensaje: str) -> Optional[str]:
             temperature=0.6,
         )
     except Exception as exc:
-        logger.error(f"Cohere respuesta fallÃ³: {exc}")
+        logger.error(f"Cohere respuesta falló: {exc}")
         return None
 
     texto = ""
@@ -1160,8 +743,8 @@ def generar_redaccion_desde_memoria(nueva_instruccion: str) -> Optional[str]:
     if instrucciones_previas:
         pedidos_previos = "\nPedidos adicionales previos:\n" + "\n".join(f"- {item}" for item in instrucciones_previas)
     instrucciones_generales = (
-        "Eres un redactor en espaÃ±ol rioplatense. Ajusta el mensaje original para que cumpla las nuevas indicaciones. "
-        "MantÃ©n el mismo destinatario y propÃ³sito. Devuelve Ãºnicamente el texto final listo para enviar, sin comillas ni explicaciones."
+        "Eres un redactor en español rioplatense. Ajusta el mensaje original para que cumpla las nuevas indicaciones. "
+        "Mantén el mismo destinatario y propósito. Devuelve únicamente el texto final listo para enviar, sin comillas ni explicaciones."
     )
     prompt = (
         f"{instrucciones_generales}\n"
@@ -1179,7 +762,7 @@ def generar_redaccion_desde_memoria(nueva_instruccion: str) -> Optional[str]:
             temperature=0.5,
         )
     except Exception as exc:
-        logger.error(f"Cohere ajuste redacciÃ³n fallÃ³: {exc}")
+        logger.error(f"Cohere ajuste redacción falló: {exc}")
         return None
     texto_respuesta = ""
     if hasattr(respuesta, "text") and respuesta.text:
@@ -1333,7 +916,7 @@ def ejecutar_accion_ventana(accion: str, nombre_ventana: str) -> None:
                     try:
                         USER32.ShowWindow(hwnd, 9)  # SW_RESTORE
                         USER32.ShowWindow(hwnd, 5)  # SW_SHOW
-                        logger.debug("RestaurÃ© la ventana %s mediante ShowWindow.", hwnd)
+                        logger.debug("Restauré la ventana %s mediante ShowWindow.", hwnd)
                     except Exception as exc:
                         logger.debug("No pude restaurar con ShowWindow: %s", exc)
 
@@ -1344,7 +927,7 @@ def ejecutar_accion_ventana(accion: str, nombre_ventana: str) -> None:
                         try:
                             attached = bool(USER32.AttachThreadInput(current_thread, target_thread, True))
                         except Exception as exc:
-                            logger.debug("AttachThreadInput fallÃ³: %s", exc)
+                            logger.debug("AttachThreadInput falló: %s", exc)
                     try:
                         try:
                             USER32.BringWindowToTop(hwnd)
@@ -1353,7 +936,7 @@ def ejecutar_accion_ventana(accion: str, nombre_ventana: str) -> None:
                         try:
                             USER32.SetForegroundWindow(hwnd)
                         except Exception as exc:
-                            logger.debug("SetForegroundWindow fallÃ³: %s", exc)
+                            logger.debug("SetForegroundWindow falló: %s", exc)
                         try:
                             USER32.SwitchToThisWindow(hwnd, True)
                         except Exception:
@@ -1368,21 +951,21 @@ def ejecutar_accion_ventana(accion: str, nombre_ventana: str) -> None:
                 try:
                     ventana.restore()
                 except Exception as exc:
-                    logger.debug("pygetwindow.restore fallÃ³: %s", exc)
+                    logger.debug("pygetwindow.restore falló: %s", exc)
 
                 try:
                     ventana.activate()
                 except Exception as exc:
-                    logger.debug("pygetwindow.activate fallÃ³: %s", exc)
+                    logger.debug("pygetwindow.activate falló: %s", exc)
 
                 try:
                     ventana.maximize()
                     time.sleep(0.05)
                     if not hwnd or USER32.IsZoomed(hwnd):
                         max_exitoso = True
-                        logger.debug("MaximizaciÃ³n directa confirmada.")
+                        logger.debug("Maximización directa confirmada.")
                 except Exception as exc:
-                    logger.debug("pygetwindow.maximize fallÃ³: %s", exc)
+                    logger.debug("pygetwindow.maximize falló: %s", exc)
 
                 if not max_exitoso and hwnd:
                     try:
@@ -1391,9 +974,9 @@ def ejecutar_accion_ventana(accion: str, nombre_ventana: str) -> None:
                         time.sleep(0.05)
                         if USER32.IsZoomed(hwnd):
                             max_exitoso = True
-                            logger.debug("MaximizaciÃ³n via ShowWindow/PostMessage confirmada.")
+                            logger.debug("Maximización via ShowWindow/PostMessage confirmada.")
                     except Exception as win_exc:
-                        logger.debug("MaximizaciÃ³n con ShowWindow/PostMessage fallÃ³: %s", win_exc)
+                        logger.debug("Maximización con ShowWindow/PostMessage falló: %s", win_exc)
 
                 if not max_exitoso:
                     try:
@@ -1404,21 +987,21 @@ def ejecutar_accion_ventana(accion: str, nombre_ventana: str) -> None:
                         time.sleep(0.05)
                         if not hwnd or USER32.IsZoomed(hwnd):
                             max_exitoso = True
-                            logger.debug("MaximizaciÃ³n via Win+Up confirmada.")
+                            logger.debug("Maximización via Win+Up confirmada.")
                     except Exception as hotkey_exc:
-                        logger.debug("Atajo Win+Up fallÃ³: %s", hotkey_exc)
+                        logger.debug("Atajo Win+Up falló: %s", hotkey_exc)
 
                 if not max_exitoso:
-                    raise RuntimeError("No pude maximizar la ventana, incluso con los mÃ©todos alternativos.")
+                    raise RuntimeError("No pude maximizar la ventana, incluso con los métodos alternativos.")
                 elif accion == "minimizar":
                     ventana.minimize()
                 elif accion == "enfocar":
                     ventana.activate()
-            logger.info("AcciÃ³n '%s' ejecutada sobre '%s'.", accion, nombre_ventana)
+            logger.info("Acción '%s' ejecutada sobre '%s'.", accion, nombre_ventana)
         else:
             raise ValueError("ventana_no_encontrada")
     except Exception as exc:
-        raise RuntimeError(f"Error en acciÃ³n de ventana: {exc}") from exc
+        raise RuntimeError(f"Error en acción de ventana: {exc}") from exc
 
 
 def listar_ventanas_y_procesos() -> None:
@@ -1435,11 +1018,11 @@ def listar_ventanas_y_procesos() -> None:
 
 def procesar_emocion_y_puntuacion(texto: str) -> str:
     texto = texto.strip()
-    if texto.endswith(("que", "como", "donde", "cuando", "por quÃ©")) or texto.lower().startswith(
-        ("quÃ© ", "cÃ³mo ", "cuÃ¡ndo ", "dÃ³nde ", "por quÃ© ")
+    if texto.endswith(("que", "como", "donde", "cuando", "por qué")) or texto.lower().startswith(
+        ("qué ", "cómo ", "cuándo ", "dónde ", "por qué ")
     ):
         return texto[0].upper() + texto[1:] + "?"
-    emocion = ["dale", "vamos", "sÃ­", "listo", "buenÃ­simo", "perfecto", "increÃ­ble", "genial", "me encanta", "de una"]
+    emocion = ["dale", "vamos", "sí", "listo", "buenísimo", "perfecto", "increíble", "genial", "me encanta", "de una"]
     for palabra in emocion:
         if re.search(rf"\b{palabra}\b", texto.lower()):
             return texto[0].upper() + texto[1:] + "!"
@@ -1475,15 +1058,14 @@ def grabar_y_procesar_orden() -> None:
             texto_acumulado = texto_acumulado.strip()
             log(f'Mensaje acumulado: "{texto_acumulado}"')
         except sr.UnknownValueError:
-            log("No entendÃ­ lo que dijiste.")
+            log("No entendí lo que dijiste.")
         except sr.RequestError as exc:
             log(f"Error de reconocimiento: {exc}")
 
         enviar_mensaje_final()
 
     set_texto_animado(
-        "Hola, soy RAI. Â¿En quÃ© puedo ayudarte?",
-        estado="procesando",
+        "Hola, soy RAI. En que puedo ayudarte?",
         after=despues_del_typing,
     )
 
@@ -1496,14 +1078,14 @@ def escuchar_fragmento() -> Optional[str]:
             try:
                 recognizer.adjust_for_ambient_noise(source, duration=0.5)
             except AssertionError as exc:
-                logger.error("No pude calibrar el micrÃ³fono: %s", exc)
+                logger.error("No pude calibrar el micrófono: %s", exc)
                 return None
             audio = recognizer.listen(source, phrase_time_limit=5)
     except (AttributeError, AssertionError, OSError, ValueError) as exc:
-        logger.error("No se pudo acceder al micrÃ³fono: %s", exc)
+        logger.error("No se pudo acceder al micrófono: %s", exc)
         return None
     except Exception as exc:
-        logger.error("Error inesperado al abrir el micrÃ³fono: %s", exc)
+        logger.error("Error inesperado al abrir el micrófono: %s", exc)
         return None
     if audio is None:
         return None
@@ -1519,13 +1101,13 @@ def escuchar_fragmento() -> Optional[str]:
 
 
 def escuchar_hotword() -> None:
-    logger.info("DecÃ­ 'okay rey' para dar una orden...")
+    logger.info("Decí 'okay rey' para dar una orden...")
     while True:
         texto = escuchar_fragmento()
         if not texto:
             continue
         if any(h in texto for h in ["okay rey", "okey rey", "hola rey", "hey rey"]):
-            logger.info("Hola, soy RAI. Â¿CÃ³mo puedo ayudarte?")
+            logger.info("Hola, soy RAI. ¿Cómo puedo ayudarte?")
             grabar_y_procesar_orden()
 
 
@@ -1562,7 +1144,7 @@ def ejecutar_comando_cmd(comando: str) -> bool:
         if comando.lower().startswith("explorer.exe shell:appsfolder") and "shell:appsfolder\\" not in comando.lower():
             comando = comando.replace("shell:appsFolder", "shell:appsFolder\\")
 
-        logger.debug("Comando tras normalizaciÃ³n: %s", comando)
+        logger.debug("Comando tras normalización: %s", comando)
 
         if comando.startswith("explorer.exe shell:appsFolder\\"):
             subprocess.Popen(comando, shell=True)
@@ -1604,7 +1186,7 @@ def ejecutar_comando_cmd(comando: str) -> bool:
                 text=True,
             )
             if resultado.returncode == 0:
-                logger.info("Comando ejecutado con Ã©xito (PowerShell).")
+                logger.info("Comando ejecutado con éxito (PowerShell).")
                 if resultado.stdout.strip():
                     logger.info(resultado.stdout)
                 return True
@@ -1613,7 +1195,7 @@ def ejecutar_comando_cmd(comando: str) -> bool:
 
         resultado = subprocess.run(comando, shell=True, capture_output=True, text=True)
         if resultado.returncode == 0:
-            logger.info("Comando ejecutado con Ã©xito.")
+            logger.info("Comando ejecutado con éxito.")
             if resultado.stdout.strip():
                 logger.info(resultado.stdout)
             return True
@@ -1636,7 +1218,7 @@ def ejecutar_comandos_en_cadena(comandos: str) -> bool:
 
 
 def es_pregunta_larga(texto: str) -> bool:
-    palabras_largas = ["buscar", "explicar", "describir", "resumir", "quÃ© es", "cÃ³mo", "quiÃ©n", "dÃ³nde", "por quÃ©"]
+    palabras_largas = ["buscar", "explicar", "describir", "resumir", "qué es", "cómo", "quién", "dónde", "por qué"]
     texto_lower = texto.lower()
     return any(p in texto_lower for p in palabras_largas)
 
@@ -1751,7 +1333,7 @@ def _detectar_texto_a_escribir(texto: str) -> Optional[str]:
     if not texto:
         return None
     patron = re.compile(
-        r"\b(escrib(?:i|Ã­|o|a|ir|ime|eme|ile?s?|les)|escribe(?:le|les)?|escribime|escribeme|escribilo|tipe(?:a|Ã¡|ame|alo|ala)|redact(?:a|Ã¡|ame|alo|ar|ales))\s+(?P<contenido>.+)",
+        r"\b(escrib(?:i|í|o|a|ir|ime|eme|ile?s?|les)|escribe(?:le|les)?|escribime|escribeme|escribilo|tipe(?:a|á|ame|alo|ala)|redact(?:a|á|ame|alo|ar|ales))\s+(?P<contenido>.+)",
         re.IGNORECASE,
     )
     match = patron.search(texto.strip())
@@ -1760,7 +1342,7 @@ def _detectar_texto_a_escribir(texto: str) -> Optional[str]:
     contenido = match.group("contenido").strip()
     if not contenido:
         return None
-    quote_chars = {'"', "'", "â€œ", "â€", "Â«", "Â»"}
+    quote_chars = {'"', "'", "“", "”", "«", "»"}
     if contenido[0] in quote_chars and contenido[-1:] == contenido[0]:
         contenido = contenido[1:-1].strip()
     return contenido
@@ -1771,7 +1353,7 @@ def _preparar_texto_escribir(contenido: str) -> str:
     if not base:
         return base
     patron_mensaje = re.compile(
-        r"^un mensaje a (?P<dest>.+?) (?:para que|para|pidi(?:Ã©|e)ndoles que|pidi(?:Ã©|e)ndole que|dici(?:Ã©|e)ndoles que|dici(?:Ã©|e)ndole que|que)\s+(?P<body>.+)",
+        r"^un mensaje a (?P<dest>.+?) (?:para que|para|pidi(?:é|e)ndoles que|pidi(?:é|e)ndole que|dici(?:é|e)ndoles que|dici(?:é|e)ndole que|que)\s+(?P<body>.+)",
         re.IGNORECASE,
     )
     match = patron_mensaje.match(base)
@@ -1788,7 +1370,7 @@ def _preparar_texto_escribir(contenido: str) -> str:
             cuerpo = ""
         if cuerpo:
             return f"Hola {dest_formateado}, {cuerpo}"
-        return f"Hola {dest_formateado}, Â¿todo bien?"
+        return f"Hola {dest_formateado}, ¿todo bien?"
     if not base.endswith((".", "!", "?")):
         base = base + "."
     return base
@@ -1799,19 +1381,19 @@ def interpretar_intencion_con_cohere(mensaje: str) -> Optional[Dict[str, Any]]:
     if not cliente:
         return None
     instrucciones = (
-        "Eres Cogere, analista de Ã³rdenes. Clasifica la solicitud del usuario.\n"
-        "Responde Ãºnicamente con JSON. Campos obligatorios:\n"
+        "Eres Cogere, analista de órdenes. Clasifica la solicitud del usuario.\n"
+        "Responde únicamente con JSON. Campos obligatorios:\n"
         "- tipo: uno de [escribir_texto, abrir_app, cerrar_app, atajo, comandos, respuesta, ninguno]\n"
-        "- razon: explicaciÃ³n breve.\n"
+        "- razon: explicación breve.\n"
         "Campos adicionales:\n"
         "* escribir_texto: agrega \"contenido\" (texto listo para escribir).\n"
         "* abrir_app / cerrar_app: agrega \"objetivo\" (nombre de la app o alias encontrado).\n"
         "* atajo: agrega \"atajo_id\" usando uno de estos IDs: "
         + ", ".join(sorted(ATAJOS_IDS.keys()))
         + ".\n"
-        "* comandos: opcionalmente \"contexto\" o \"nota\" para guiar la generaciÃ³n de comandos.\n"
-        "* respuesta: agrega \"texto\" con la respuesta natural en espaÃ±ol.\n"
-        "Si no procede ninguna acciÃ³n, responde tipo=ninguno.\n"
+        "* comandos: opcionalmente \"contexto\" o \"nota\" para guiar la generación de comandos.\n"
+        "* respuesta: agrega \"texto\" con la respuesta natural en español.\n"
+        "Si no procede ninguna acción, responde tipo=ninguno.\n"
         "No agregues texto fuera del JSON."
     )
     prompt = f"{instrucciones}\nOrden del usuario: \"{mensaje.strip()}\""
@@ -1835,11 +1417,11 @@ def interpretar_intencion_con_cohere(mensaje: str) -> Optional[Dict[str, Any]]:
             texto = (respuesta.output_text or "").strip()
         datos = _extraer_json(texto)
         if not datos:
-            logger.debug("InterpretaciÃ³n Cohere invÃ¡lida: %s", texto)
+            logger.debug("Interpretación Cohere inválida: %s", texto)
             return None
         return datos
     except Exception as exc:
-        logger.error(f"Cohere interpretador fallÃ³: {exc}")
+        logger.error(f"Cohere interpretador falló: {exc}")
         return None
 
 
@@ -1883,7 +1465,7 @@ def _es_pedido_repeticion(texto: str) -> bool:
         r"\blo\s+mismo\s+que\s+antes\b",
         r"\b(lo|haz|hace|haceme|hacelo)\s+(de\s+)?(nuevo|igual)\b",
         r"\brepite\s+lo\s+(anterior|mismo)\b",
-        r"\blo\s+de\s+(reci[eÃ©]n|antes)\b",
+        r"\blo\s+de\s+(reci[eé]n|antes)\b",
     ]
     return any(re.search(patron, texto_norm) for patron in patrones)
 
@@ -1945,18 +1527,18 @@ def _detectar_ajuste_redaccion(texto: str) -> bool:
 
 def _repetir_ultima_accion() -> Tuple[bool, str]:
     if not historial_acciones:
-        return False, "No recuerdo una acciÃ³n previa todavÃ­a."
+        return False, "No recuerdo una acción previa todavía."
     ultima = historial_acciones[-1]
     tipo = ultima.get("tipo")
     if tipo == "ventana":
         accion = ultima.get("accion")
         objetivo = ultima.get("objetivo")
         if not accion or not objetivo:
-            return False, "No pude repetir la acciÃ³n de ventana."
+            return False, "No pude repetir la acción de ventana."
         try:
             ejecutar_accion_ventana(accion, objetivo)
             registrar_accion({"tipo": "ventana", "accion": accion, "objetivo": objetivo})
-            return True, f"RepetÃ­ la acciÃ³n de ventana: {accion} {objetivo}"
+            return True, f"Repetí la acción de ventana: {accion} {objetivo}"
         except RuntimeError as exc:
             return False, str(exc)
     if tipo == "atajo":
@@ -1973,21 +1555,21 @@ def _repetir_ultima_accion() -> Tuple[bool, str]:
         if _ejecutar_combos_teclado(combos_tuplas):
             registrar_accion({"tipo": "atajo", "combos": combos_tuplas, "descripcion": descripcion})
             return True, descripcion
-        return False, "El atajo anterior fallÃ³ al repetirse."
+        return False, "El atajo anterior falló al repetirse."
     if tipo == "texto":
         contenido = ultima.get("texto")
         if not contenido:
-            return False, "No tengo quÃ© escribir."
+            return False, "No tengo qué escribir."
         try:
             pyautogui.write(contenido)
             registrar_accion({"tipo": "texto", "texto": contenido})
-            return True, f"VolvÃ­ a escribir: {contenido}"
+            return True, f"Volví a escribir: {contenido}"
         except Exception as exc:
             return False, f"No pude escribir otra vez: {exc}"
     if tipo == "respuesta":
         contenido = ultima.get("texto") or ultima.get("respuesta") or ""
         if not contenido:
-            return False, "No tengo quÃ© responder."
+            return False, "No tengo qué responder."
         hud.log(contenido)
         registrar_accion({"tipo": "respuesta", "texto": contenido})
         return True, contenido
@@ -1997,9 +1579,9 @@ def _repetir_ultima_accion() -> Tuple[bool, str]:
             return False, "No encuentro los comandos anteriores."
         if ejecutar_comandos_en_cadena(comandos):
             registrar_accion({"tipo": "comandos", "comandos": comandos})
-            return True, "RepetÃ­ los comandos anteriores."
+            return True, "Repetí los comandos anteriores."
         return False, "Los comandos anteriores fallaron al repetirse."
-    return False, "No pude interpretar la Ãºltima acciÃ³n."
+    return False, "No pude interpretar la última acción."
 
 
 def _detectar_accion_ventana(texto: str) -> Optional[tuple[str, str]]:
@@ -2078,10 +1660,6 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
         threading.Timer(delay, hud.ocultar).start()
         return
 
-    if handle_voice_command(mensaje):
-        texto_acumulado = ""
-        return
-
     if _detectar_ajuste_redaccion(mensaje):
         nuevo_texto = generar_redaccion_desde_memoria(mensaje)
         if nuevo_texto:
@@ -2100,8 +1678,8 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
             _actualizar_texto_memoria(nuevo_texto)
             _agregar_instruccion_memoria(mensaje)
             texto_acumulado = ""
-            logger.info("Texto ajustado a partir de la memoria de redacciÃ³n.")
-            notificar_y_activar_follow_up("ActualicÃ© el mensaje segÃºn tu pedido.")
+            logger.info("Texto ajustado a partir de la memoria de redacción.")
+            notificar_y_activar_follow_up("Actualicé el mensaje según tu pedido.")
             return
         hud.log("No pude ajustar el mensaje anterior.")
         texto_acumulado = ""
@@ -2113,7 +1691,7 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
     if interpretacion:
         interpret_tipo = str(interpretacion.get("tipo") or "").lower()
         logger.info(
-            "InterpretaciÃ³n Cohere: tipo=%s razon=%s",
+            "Interpretación Cohere: tipo=%s razon=%s",
             interpret_tipo or "desconocido",
             interpretacion.get("razon"),
         )
@@ -2126,7 +1704,7 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
     if interpret_tipo == "respuesta":
         texto_respuesta = str((interpretacion.get("texto") if interpretacion else "") or "").strip()
         if not texto_respuesta:
-            texto_respuesta = generar_respuesta_con_cohere(mensaje) or "PerdÃ³n, Â¿podrÃ­as repetirme?"
+            texto_respuesta = generar_respuesta_con_cohere(mensaje) or "Perdón, ¿podrías repetirme?"
         registrar_accion({"tipo": "respuesta", "texto": texto_respuesta})
         texto_acumulado = ""
         notificar_y_activar_follow_up(texto_respuesta)
@@ -2147,7 +1725,7 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
             except Exception as exc:
                 hud.log(f"No pude escribir: {exc}")
         else:
-            hud.log("Cohere no enviÃ³ contenido para escribir.")
+            hud.log("Cohere no envió contenido para escribir.")
         texto_acumulado = ""
         threading.Timer(2, hud.ocultar).start()
         return
@@ -2217,7 +1795,7 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
     accion_ventana = _detectar_accion_ventana(mensaje)
     if accion_ventana:
         accion, objetivo = accion_ventana
-        logger.info("AcciÃ³n de ventana detectada: %s -> %s", accion, objetivo)
+        logger.info("Acción de ventana detectada: %s -> %s", accion, objetivo)
         try:
             ejecutar_accion_ventana(accion, objetivo)
         except RuntimeError as exc:
@@ -2263,7 +1841,7 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
         if ejecutar_comandos_en_cadena(comandos_generados):
             registrar_accion({"tipo": "comandos", "comandos": comandos_generados})
             texto_acumulado = ""
-            mensaje_exitoso = descripcion or "AcciÃ³n completada."
+            mensaje_exitoso = descripcion or "Acción completada."
             notificar_y_activar_follow_up(mensaje_exitoso)
             return
         logger.warning("Los comandos sugeridos por Cohere fallaron: %s", comandos_generados)
