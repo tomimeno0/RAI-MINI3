@@ -75,6 +75,7 @@ memoria_redaccion: Dict[str, Any] = {
     "solicitud": "",
     "instrucciones": [],
 }
+interaccion_en_curso = threading.Event()  # Senal para bloquear hotwords duplicadas mientras se procesa una orden.
 USER32 = ctypes.windll.user32
 KERNEL32 = ctypes.windll.kernel32
 """
@@ -104,6 +105,37 @@ FOLLOW_UP_EXIT_FRASES = {
     "seria todo",
     "sería todo",
 }
+
+
+class _NullAudioStream:
+    """Implementa close() no-op para evitar AttributeError al salir del contexto de micrófono."""
+
+    def close(self) -> None:
+        return
+
+
+def _blinda_cierre_fuente(source: Any) -> None:
+    """Garantiza que el cierre del micrófono no falle aun si PyAudio no abrió un stream."""
+    if getattr(source, "stream", None) is None:
+        source.stream = _NullAudioStream()
+
+
+def _informar_mic_no_disponible(motivo: str) -> None:
+    """Registra y muestra al usuario la ausencia de una fuente de audio utilizable."""
+    logger.error(
+        "No detecté un micrófono disponible (%s). Revisá la configuración de entrada de audio.",
+        motivo,
+    )
+    log("No detecté micrófono disponible. Revisá la configuración de sonido.")
+    try:
+        nombres = sr.Microphone.list_microphone_names()
+    except Exception as exc:  # pragma: no cover - depende de PyAudio
+        logger.debug("No pude listar los micrófonos registrados: %s", exc)
+        return
+    if nombres:
+        logger.info("Micrófonos detectados por PyAudio: %s", ", ".join(nombres))
+    else:
+        logger.info("PyAudio no detectó dispositivos de entrada.")
 
 
 def _cerrar_servidor_consola() -> None:
@@ -1343,27 +1375,41 @@ def grabar_y_procesar_orden() -> None:
 
     def despues_del_typing() -> None:
         global texto_acumulado
-        recognizer = sr.Recognizer()
-        mic = sr.Microphone()
-        with mic as source:
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            audio = recognizer.listen(source, timeout=None)
-            set_estado("escuchando", "Escuchando...")
-        log("Procesando orden...")
-
         try:
-            texto = recognizer.recognize_google(audio, language="es-AR")
-            texto = procesar_emocion_y_puntuacion(texto)
-            log(f'Fragmento capturado: "{texto}"')
-            texto_acumulado += " " + texto
-            texto_acumulado = texto_acumulado.strip()
-            log(f'Mensaje acumulado: "{texto_acumulado}"')
-        except sr.UnknownValueError:
-            log("No entendí lo que dijiste.")
-        except sr.RequestError as exc:
-            log(f"Error de reconocimiento: {exc}")
+            recognizer = sr.Recognizer()
+            mic = sr.Microphone()
+            with mic as source:
+                if getattr(source, "stream", None) is None:
+                    _informar_mic_no_disponible("PyAudio no devolvio un stream activo")
+                    _blinda_cierre_fuente(source)
+                    set_estado("error", "No detecte microfono disponible.")
+                    return
+                try:
+                    recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                except AssertionError as exc:
+                    _blinda_cierre_fuente(source)
+                    _informar_mic_no_disponible(f"fallo la calibracion: {exc}")
+                    set_estado("error", "No detecte microfono disponible.")
+                    return
+                set_estado("escuchando", "RAI escuchando...")
+                audio = recognizer.listen(source, timeout=None)
+            set_estado("procesando", "Procesando...")
+            log("Procesando orden...")
+            try:
+                texto = recognizer.recognize_google(audio, language="es-AR")
+                texto = procesar_emocion_y_puntuacion(texto)
+                log(f'Fragmento capturado: "{texto}"')
+                texto_acumulado += " " + texto
+                texto_acumulado = texto_acumulado.strip()
+                log(f'Mensaje acumulado: "{texto_acumulado}"')
+            except sr.UnknownValueError:
+                log("No entendi lo que dijiste.")
+            except sr.RequestError as exc:
+                log(f"Error de reconocimiento: {exc}")
+            enviar_mensaje_final()
+        finally:
+            interaccion_en_curso.clear()
 
-        enviar_mensaje_final()
 
     set_texto_animado(
         "Hola, soy RAI. En que puedo ayudarte?",
@@ -1376,14 +1422,19 @@ def escuchar_fragmento() -> Optional[str]:
     audio: Optional["sr.AudioData"] = None
     try:
         with sr.Microphone() as source:
+            if getattr(source, "stream", None) is None:
+                _informar_mic_no_disponible("PyAudio no devolvió un stream activo")
+                _blinda_cierre_fuente(source)
+                return None
             try:
                 recognizer.adjust_for_ambient_noise(source, duration=0.5)
             except AssertionError as exc:
-                logger.error("No pude calibrar el micrófono: %s", exc)
+                _blinda_cierre_fuente(source)
+                _informar_mic_no_disponible(f"falló la calibración: {exc}")
                 return None
             audio = recognizer.listen(source, phrase_time_limit=5)
     except (AttributeError, AssertionError, OSError, ValueError) as exc:
-        logger.error("No se pudo acceder al micrófono: %s", exc)
+        _informar_mic_no_disponible(str(exc))
         return None
     except Exception as exc:
         logger.error("Error inesperado al abrir el micrófono: %s", exc)
@@ -1402,15 +1453,25 @@ def escuchar_fragmento() -> Optional[str]:
 
 
 def escuchar_hotword() -> None:
-    logger.info("Decí 'okay rey' para dar una orden...")
+    logger.info("Deci 'okay rey' para dar una orden...")
     while True:
         texto = escuchar_fragmento()
         if not texto:
             continue
-        if any(h in texto for h in ["okay rey", "okey rey", "hola rey", "hey rey"]):
-            logger.info("Hola, soy RAI. ¿Cómo puedo ayudarte?")
-            grabar_y_procesar_orden()
-
+        texto_normalizado = texto.strip().lower()
+        if not texto_normalizado:
+            continue
+        if any(h in texto_normalizado for h in ["okay rey", "okey rey", "hola rey", "hey rey"]):
+            if interaccion_en_curso.is_set():
+                logger.debug("Hotword ignorada porque ya hay una interaccion activa.")
+                continue
+            interaccion_en_curso.set()
+            logger.info("Hola, soy RAI. Como puedo ayudarte?")
+            try:
+                grabar_y_procesar_orden()
+            except Exception:
+                interaccion_en_curso.clear()
+                raise
 
 def ejecutar_comando_cmd(comando: str) -> bool:
     try:

@@ -12,12 +12,148 @@ namespace RaiMiniLauncher
 {
     internal static class Program
     {
+        private const string MutexName = @"Local\RAI-MINI-LAUNCHER";
+        private static Mutex singleInstanceMutex;
+
         [STAThread]
         private static void Main()
         {
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new LauncherContext());
+            if (IsAnotherLauncherInstanceRunning())
+            {
+                ShowAlreadyRunningNotice();
+                return;
+            }
+
+            if (!TryAcquireMutex())
+            {
+                ShowAlreadyRunningNotice();
+                return;
+            }
+
+            try
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new LauncherContext());
+            }
+            finally
+            {
+                ReleaseMutex();
+            }
+        }
+
+        private static bool TryAcquireMutex()
+        {
+            try
+            {
+                singleInstanceMutex = new Mutex(initiallyOwned: false, name: MutexName);
+                if (!singleInstanceMutex.WaitOne(0, false))
+                {
+                    singleInstanceMutex.Dispose();
+                    singleInstanceMutex = null;
+                    return false;
+                }
+                return true;
+            }
+            catch (AbandonedMutexException)
+            {
+                // Otra instancia se cerró abruptamente; retomamos el mutex igualmente.
+                return true;
+            }
+            catch
+            {
+                singleInstanceMutex?.Dispose();
+                singleInstanceMutex = null;
+                return false;
+            }
+        }
+
+        private static void ReleaseMutex()
+        {
+            var mutex = singleInstanceMutex;
+            if (mutex == null)
+            {
+                return;
+            }
+
+            try
+            {
+                mutex.ReleaseMutex();
+            }
+            catch
+            {
+                // Ignoramos errores al liberar (p.ej. si ya fue liberado).
+            }
+
+            try
+            {
+                mutex.Dispose();
+            }
+            catch
+            {
+            }
+
+            singleInstanceMutex = null;
+        }
+
+        private static bool IsAnotherLauncherInstanceRunning()
+        {
+            try
+            {
+                using (var current = Process.GetCurrentProcess())
+                {
+                    var executablePath = Application.ExecutablePath;
+                    foreach (var process in Process.GetProcessesByName(current.ProcessName))
+                    {
+                        try
+                        {
+                            if (process.Id == current.Id)
+                            {
+                                continue;
+                            }
+
+                            var otherPath = process.MainModule?.FileName;
+                            if (!string.IsNullOrEmpty(otherPath) &&
+                                string.Equals(otherPath, executablePath, StringComparison.OrdinalIgnoreCase))
+                            {
+                                return true;
+                            }
+                        }
+                        catch
+                        {
+                            // No pudimos inspeccionar el módulo; asumimos que podría ser el mismo ejecutable.
+                            return true;
+                        }
+                        finally
+                        {
+                            process.Dispose();
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Si no podemos verificar, preferimos no bloquear.
+                return false;
+            }
+
+            return false;
+        }
+
+        private static void ShowAlreadyRunningNotice()
+        {
+            try
+            {
+                MessageBox.Show(
+                    "RAI ya esta ejecutandose. Usa el icono de la bandeja para abrir la terminal o salir.",
+                    "RAI-MINI",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch
+            {
+                // Ignoramos errores si no hay escritorio interactivo.
+            }
         }
     }
 

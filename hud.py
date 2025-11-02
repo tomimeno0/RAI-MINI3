@@ -372,39 +372,44 @@ def expandir_altura_suave(paso=3, delay=3):
 
 def mostrar(texto=None, es_expansivo=False, after=None, es_bienvenida=False):
     global hud_visible, texto_acumulado
-    hud_visible = False
-    if root and not hud_visible:
-        hud_visible = True
-        _play_sound("SystemNotification")
-        texto_acumulado = ""
-        root.deiconify()
-        root.attributes("-alpha", 0)
-        bubble_label.configure(text="")
+    if root is None or bubble_label is None or frame is None:
+        return
 
-        # Posicionar según tipo de mensaje
-        if es_bienvenida:
-            bubble_label.place(relx=0.5, rely=0.5, anchor="center")
-            bubble_label.configure(font=("SF Pro Display", 20))  # 🔠 Más grande en bienvenida
-        else:
-            bubble_label.place(relx=0.05, rely=0.1, anchor="nw")
-            bubble_label.configure(font=("SF Pro Display", 19))  # 🔠 Letra general más grande
-
-        # Tamaño inicial según expansión
-        if es_expansivo:
-            root.geometry("600x200")
-            frame.configure(width=600, height=170)
-            bubble_label.configure(wraplength=560)
-        else:
-            root.geometry(f"{ANCHO}x{ALTO_NORMAL}")
-            frame.configure(width=ANCHO, height=ALTO_NORMAL - 30)
-            bubble_label.configure(wraplength=ANCHO - 40)
-
-        frame.configure(border_color=estado_colores.get("procesando", "#888"))
-        fade_in()
-
+    if hud_visible:
         if texto:
             set_texto_animado(_limit_text(texto), estado="procesando", after=after)
+        return
 
+    hud_visible = True
+    _play_sound("SystemNotification")
+    texto_acumulado = ""
+    root.deiconify()
+    root.attributes("-alpha", 0)
+    bubble_label.configure(text="")
+
+    # Posicionar segun el tipo de mensaje
+    if es_bienvenida:
+        bubble_label.place(relx=0.5, rely=0.5, anchor="center")
+        bubble_label.configure(font=("SF Pro Display", 20))
+    else:
+        bubble_label.place(relx=0.05, rely=0.1, anchor="nw")
+        bubble_label.configure(font=("SF Pro Display", 19))
+
+    # Tamano inicial segun necesidad de expansion
+    if es_expansivo:
+        root.geometry("600x200")
+        frame.configure(width=600, height=170)
+        bubble_label.configure(wraplength=560)
+    else:
+        root.geometry(f"{ANCHO}x{ALTO_NORMAL}")
+        frame.configure(width=ANCHO, height=ALTO_NORMAL - 30)
+        bubble_label.configure(wraplength=ANCHO - 40)
+
+    frame.configure(border_color=estado_colores.get("procesando", "#888"))
+    fade_in()
+
+    if texto:
+        set_texto_animado(_limit_text(texto), estado="procesando", after=after)
 
 def ocultar():
     """Oculta el HUD con fade-out y restaura posición/tamaño originales."""
