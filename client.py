@@ -11,9 +11,14 @@ import subprocess
 import threading
 import time
 import unicodedata
+import atexit  # Registramos callbacks de limpieza para cerrar recursos IPC de consola aunque el proceso termine abruptamente.
+import errno  # Interpretamos códigos de error de sockets al intentar abrir el canal IPC sin colisionar con instancias previas.
+import msvcrt  # Ajustamos el modo texto de los descriptores CONIN$/CONOUT$ tras adjuntar la consola de Windows al proceso actual.
+import socket  # Implementamos un canal TCP local mínimo para que la segunda instancia solicite la unión de la consola al proceso residente.
+import sys  # Redirigimos sys.stdout/sys.stderr/sys.stdin hacia los manejadores de la consola recién obtenida o hacia el fallback.
 from collections import deque
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 import keyboard  # type: ignore
 import psutil
@@ -43,6 +48,22 @@ usuario = os.getlogin()
 texto_acumulado = ""
 CATALOGO_PATH = Path(__file__).with_name("apps.json")
 COHERE_LOG_PATH = Path(__file__).with_name("cohere.log")
+CLIENT_LOG_PATH = Path(__file__).with_name("client.log")  # Archivo de log persistente cuyo tail mostramos al adjuntar la consola para contextualizar al operador.
+CONSOLE_SERVER_HOST = "127.0.0.1"  # Limitamos el servidor IPC de consola al loopback para impedir peticiones remotas que no pertenecen a esta máquina.
+CONSOLE_SERVER_PORT = 57317  # Puerto TCP fijo elegido adrede para detectar colisiones y coordinar a la instancia mensajera con el proceso residente.
+CONSOLE_SERVER_TOKEN = "rai-mini-console-v1"  # Token estático sencillo que filtra peticiones accidentales y asegura que el comando proviene de nuestro cliente.
+_console_server_socket: Optional[socket.socket] = None  # Guardamos la referencia del socket de escucha para cerrarlo explícitamente en la rutina de apagado.
+_console_server_thread: Optional[threading.Thread] = None  # Conservamos el hilo del bucle de aceptación para evitar fugas y facilitar el join implícito al terminar.
+_console_stream_refs: Dict[str, Any] = {}  # Retenemos los file objects de CONIN$/CONOUT$ para impedir que el GC los cierre y mantener vivos los flujos redirigidos.
+_client_file_handler: Optional[logging.Handler] = None  # Handler global que persistirá durante toda la vida del proceso para escribir el historial en client.log sin duplicar instancias al reiniciar la app.
+try:
+    CLIENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)  # Creamos la carpeta del log si aún no existe, evitando excepciones al inicializar el FileHandler.
+    _client_file_handler = logging.FileHandler(CLIENT_LOG_PATH, mode="a", encoding="utf-8")  # Abrimos el archivo en modo append para conservar el historial previo cada vez que arranca el cliente.
+    _client_file_handler.setLevel(logging.INFO)  # Sincronizamos el nivel del handler con el resto del sistema (INFO) para capturar los mismos eventos que van a consola.
+    _client_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))  # Reutilizamos el formato estándar de timestamp/nivel para mantener coherencia visual.
+    logging.getLogger().addHandler(_client_file_handler)  # Registramos el handler en el logger raíz para que toda la jerarquía propague sus mensajes al archivo.
+except Exception as exc:
+    logger.error("No pude inicializar el file handler de client.log: %s", exc)  # Dejamos constancia en logs si la inicialización falló, manteniendo al usuario informado.
 catalogo_lock = threading.Lock()
 _catalogo_cache: Optional[Dict[str, Any]] = None
 COHERE_MODEL = os.getenv("COHERE_MODEL", "command-r-plus-08-2024")
@@ -66,6 +87,9 @@ Notas sobre configuración:
 
 follow_up_mode = False
 follow_up_lock = threading.Lock()
+shutdown_confirmation_lock = threading.Lock()
+shutdown_confirmation_pending = False
+shutdown_timer: Optional[threading.Timer] = None
 FOLLOW_UP_PROMPT = "¿Necesitás algo más?"
 FOLLOW_UP_EXIT_FRASES = {
     "nada",
@@ -80,6 +104,214 @@ FOLLOW_UP_EXIT_FRASES = {
     "seria todo",
     "sería todo",
 }
+
+
+def _cerrar_servidor_consola() -> None:
+    """Cierra el servidor TCP que escucha solicitudes de adjuntar consola."""
+    global _console_server_socket  # Indicamos que vamos a modificar la referencia global del socket para actualizarla tras cerrarlo.
+    if _console_server_socket is None:  # Si no hay socket activo, no hay nada que limpiar y evitamos excepciones.
+        return  # Terminamos temprano porque no hay recursos que liberar.
+    try:
+        _console_server_socket.close()  # Cerramos el descriptor para liberar el puerto y permitir reinicios posteriores sin TIME_WAIT prolongado.
+    except OSError:
+        pass  # Ignoramos errores de cierre porque el objetivo es únicamente liberar recursos y fallos aquí no afectan la lógica.
+    finally:
+        _console_server_socket = None  # Resetemos la referencia global para que futuras inicializaciones comprendan que no hay servidor activo.
+
+
+def _bucle_servidor_consola(sock: socket.socket) -> None:
+    """Atiende conexiones entrantes de auxiliares que piden adjuntar la consola al proceso residente."""
+    while True:  # Mantenemos el hilo vivo aceptando peticiones hasta que el socket se cierre explícitamente.
+        try:
+            conn, _ = sock.accept()  # Bloqueamos esperando un cliente; obtenemos el socket dedicado a la sesión.
+        except OSError:
+            break  # Si accept lanza error es porque el socket se cerró; abandonamos el bucle sin propagar excepciones al hilo daemon.
+        with conn:  # Garantizamos que el socket de cliente se cierre automáticamente al salir del bloque, evitando fugas.
+            try:
+                conn.settimeout(2.0)  # Limitamos el tiempo de lectura para no bloquear indefinidamente si el cliente deja de enviar datos.
+                payload_bytes = conn.recv(65536)  # Leemos hasta 64 KB, suficiente para nuestra pequeña orden JSON sin gastar memoria excesiva.
+            except OSError:
+                continue  # Un fallo de lectura implica un cliente defectuoso; ignoramos la petición y seguimos con la siguiente.
+            if not payload_bytes:  # Si no se recibió información, la sesión no es válida y no vale la pena procesarla.
+                continue  # Reintentamos con la próxima conexión, dejando la presente sin respuesta.
+            try:
+                payload = json.loads(payload_bytes.decode("utf-8"))  # Parseamos el JSON enviado para obtener el comando estructurado.
+            except json.JSONDecodeError:
+                continue  # Un formato inválido supone que no es nuestra petición esperada; descartamos sin hacer nada.
+            if payload.get("token") != CONSOLE_SERVER_TOKEN:  # Validamos el token para asegurarnos de que la orden proviene de nuestro lanzador.
+                continue  # Si el token no coincide, no ejecutamos acciones para evitar ejecuciones accidentales.
+            if payload.get("command") != "attach_console":  # Solo entendemos la orden de adjuntar consola; ignoramos cualquier otro comando futuro.
+                continue  # Al no ser el comando esperado, terminamos la iteración actual.
+            host_pid = int(payload.get("host_pid") or 0)  # Extraemos el PID del proceso anfitrión de la consola (generalmente cmd.exe) como entero.
+            helper_pid = int(payload.get("helper_pid") or 0)  # Recuperamos el PID del proceso auxiliar por si necesitamos adjuntarnos a su consola como respaldo.
+            logger.info("Solicitud de adjuntar consola recibida (host_pid=%s, helper_pid=%s).", host_pid, helper_pid)  # Registramos los detalles para diagnosticar posibles fallos.
+            success = _adjuntar_consola_desde_peticion(host_pid=host_pid, helper_pid=helper_pid)  # Ejecutamos la lógica de adjuntar y capturamos si funcionó.
+            try:
+                conn.sendall(json.dumps({"ok": success}).encode("utf-8"))  # Respondemos al cliente con un JSON simple para confirmar el resultado.
+            except OSError:
+                pass  # Si no podemos responder no es crítico; la acción ya ocurrió en el proceso residente.
+
+
+def _adjuntar_consola_desde_peticion(host_pid: int, helper_pid: int) -> bool:
+    """Adjunta la consola visible al proceso actual o lanza un fallback si no es posible."""
+    target_pid = host_pid or helper_pid  # Priorizamos el PID de la consola anfitriona (cmd.exe) y usamos el auxiliar si el primero no estuviera disponible.
+    KERNEL32.FreeConsole()  # Soltamos cualquier consola previa asociada al proceso para que AttachConsole/AllocConsole puedan ejecutarse sin error.
+    attached = False  # Flag que refleja si logramos vincularnos a la consola existente o tendremos que crear una propia.
+    if target_pid:  # Solo intentamos el adjunte si recibimos un PID válido desde el mensajero.
+        attached = bool(KERNEL32.AttachConsole(target_pid))  # Compartimos la consola abierta por el lanzador (cmd.exe) para reutilizar la misma ventana visible.
+        if not attached:  # Si AttachConsole devolvió cero, registramos el error devuelto por Windows para diagnóstico.
+            logger.error("AttachConsole falló (pid=%s, error=%s).", target_pid, ctypes.get_last_error())
+    if not attached:  # Si no hubo consola disponible (pythonw, permisos), creamos una nueva para el proceso residente.
+        if KERNEL32.AllocConsole() == 0:  # Pedimos a Windows una consola propia; si falla, no tendremos dónde mostrar logs.
+            logger.error("AllocConsole falló (error=%s).", ctypes.get_last_error())  # Registramos el código de error Win32 por si necesitamos investigar derechos o políticas.
+            _abrir_powershell_fallback()  # Activamos el fallback en PowerShell para asegurar al menos el tail de client.log.
+            return False  # Comunicamos al llamador que la unión directa fracasó y recurrimos a la alternativa.
+    if not _configurar_consola_actual(mostrar_banner=True):  # Reutilizamos la rutina común de redirección; si falla recurrimos al fallback.
+        _abrir_powershell_fallback()  # Si la configuración no se pudo completar, garantizamos al menos el tail vía PowerShell.
+        return False  # Comunicamos que no se pudo adjuntar la consola nativa.
+    logger.info("Consola de logs adjuntada correctamente al proceso principal.")  # Registramos en el log que la consola quedó enlazada para trazabilidad posterior.
+    return True  # Informamos que la operación fue satisfactoria y no se requirió el fallback.
+
+
+def _reconfigurar_handlers_logging() -> None:
+    """Actualiza los StreamHandler de logging para que escriban en la consola recién adjuntada."""
+    for active_logger in (logging.getLogger(), logger):  # Iteramos tanto el logger raíz como el específico de este módulo para cubrir todos los handlers.
+        for handler in list(active_logger.handlers):  # Copiamos la lista para poder modificarla sin interferir con iteraciones internas de logging.
+            if isinstance(handler, logging.StreamHandler):  # Solo los StreamHandler dependen de un descriptor mutable; los demás (p.ej. FileHandler) no se tocan.
+                handler.setStream(sys.stdout)  # Redirigimos el stream hacia sys.stdout, que ahora apunta a la consola activa.
+
+
+def _imprimir_tail_log_consola() -> None:
+    """Imprime las últimas 200 líneas de client.log si existe, cumpliendo el requerimiento de contexto."""
+    if not CLIENT_LOG_PATH.exists():  # Validamos la existencia del log para evitar excepciones al intentar leerlo.
+        print("No se encontró client.log; comenzando captura en vivo sin historial previo.")  # Avisamos al operador que no hay historial que mostrar.
+        return  # Salimos porque no hay líneas previas que imprimir.
+    try:
+        with CLIENT_LOG_PATH.open("r", encoding="utf-8", errors="replace") as log_file:  # Abrimos el archivo tolerando caracteres inválidos para no fallar en lectura.
+            ultimas_lineas = deque(log_file, maxlen=200)  # Aprovechamos deque para retener eficientemente solo las 200 líneas finales.
+    except OSError as exc:
+        print(f"No pude leer {CLIENT_LOG_PATH}: {exc}.")  # Comunicamos el error de IO para facilitar depuración si el archivo está bloqueado.
+        return  # Sin lectura posible, no hay nada que mostrar en consola.
+    if not ultimas_lineas:  # Si el archivo existe pero está vacío, lo indicamos explícitamente.
+        print("El archivo client.log está vacío por el momento.")  # Mensaje orientado al operador dejando claro que la falta de líneas no es un fallo.
+        return  # Detenemos el proceso porque no hay contenido que desplegar.
+    for linea in ultimas_lineas:  # Iteramos las líneas retenidas respetando su orden cronológico.
+        print(linea.rstrip("\n"))  # Mostramos cada línea eliminando el salto final para evitar dobles saltos en la consola.
+
+
+def _configurar_consola_actual(mostrar_banner: bool) -> bool:
+    """Redirige stdout/stderr/stdin a la consola actual y opcionalmente imprime encabezado + tail del log."""
+    try:
+        stdout_stream = open("CONOUT$", "w", buffering=1, encoding="utf-8", errors="replace")  # Abrimos el dispositivo de salida estándar asociado a la consola visible con codificación robusta.
+        stderr_stream = open("CONOUT$", "w", buffering=1, encoding="utf-8", errors="replace")  # Reutilizamos el mismo descriptor para stderr garantizando que ambos flujos salgan por la ventana adjunta.
+        stdin_stream = open("CONIN$", "r", buffering=1, encoding="utf-8", errors="replace")  # Habilitamos la lectura desde la consola para comandos interactivos futuros.
+    except OSError as exc:
+        logger.error("No pude abrir los pseudodispositivos de consola: %s", exc)  # Dejamos registro del fallo para diagnóstico.
+        return False  # Avisamos al llamador que la configuración no pudo completarse.
+    msvcrt.setmode(stdout_stream.fileno(), os.O_TEXT)  # Forzamos modo texto en stdout para que Windows no interprete bytes como binario.
+    msvcrt.setmode(stderr_stream.fileno(), os.O_TEXT)  # Repetimos el ajuste en stderr evitando caracteres corruptos en mensajes de error.
+    msvcrt.setmode(stdin_stream.fileno(), os.O_TEXT)  # Ajustamos stdin para que lecturas con input() funcionen correctamente.
+    sys.stdout = stdout_stream  # Reemplazamos sys.stdout global para que print() escriba en la nueva consola.
+    sys.stderr = stderr_stream  # Redirigimos sys.stderr asegurando que tracebacks y logging estándar aparezcan en pantalla.
+    sys.stdin = stdin_stream  # Actualizamos sys.stdin, permitiendo interacción si se requiere.
+    os.dup2(stdout_stream.fileno(), 1)  # Duplicamos el descriptor de bajo nivel STDOUT hacia la consola para cubrir extensiones C.
+    os.dup2(stderr_stream.fileno(), 2)  # Hacemos lo mismo con STDERR para capturar mensajes nativos.
+    os.dup2(stdin_stream.fileno(), 0)  # Reenrutamos STDIN de bajo nivel para que cualquier lectura raw provenga de la consola.
+    _console_stream_refs.update({"stdout": stdout_stream, "stderr": stderr_stream, "stdin": stdin_stream})  # Conservamos referencias a los streams para impedir que el GC los cierre inadvertidamente.
+    _reconfigurar_handlers_logging()  # Actualizamos los handlers de logging para que escriban en el nuevo sys.stdout.
+    if mostrar_banner:  # Solo imprimimos encabezado y tail cuando se solicita (por ejemplo, al adjuntar o al iniciar con consola visible).
+        print("=== Consola de logs adjuntada al proceso actual ===")  # Encabezado requerido que indica que la consola quedó enlazada.
+        _imprimir_tail_log_consola()  # Volcamos las últimas líneas del log histórico para llenar la ventana con contexto inmediato.
+    logger.info("Streams de consola redirigidos correctamente (mostrar_banner=%s).", mostrar_banner)  # Confirmamos en el log que la reconfiguración se completó.
+    sys.stdout.flush()  # Vaciamos el buffer para que el encabezado/tail se vean al instante.
+    return True  # Indicamos éxito al llamador.
+
+
+def _abrir_powershell_fallback() -> None:
+    """Lanza la alternativa Get-Content en PowerShell cuando no se pudo adjuntar la consola tradicional."""
+    comando = f'Get-Content -Path "{CLIENT_LOG_PATH}" -Wait'  # Preparamos el comando que mantendrá un tail en vivo sobre el log del cliente.
+    try:
+        subprocess.Popen(  # Iniciamos un nuevo proceso independiente para no bloquear al hilo de atención.
+            ["powershell", "-NoExit", "-Command", comando],  # Ejecutamos PowerShell manteniéndolo abierto para que siga actualizando el tail.
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),  # Pedimos una ventana separada garantizando visibilidad incluso desde pythonw.exe.
+        )
+    except Exception as exc:
+        logger.error("No pude iniciar el fallback de PowerShell: %s", exc)  # Registramos el fallo para que quede constancia en el log principal.
+
+
+def _enviar_solicitud_adjuntar_consola() -> bool:
+    """Envía la orden de adjuntar consola a la instancia residente y devuelve True si respondió OK."""
+    try:
+        parent_pid = psutil.Process(os.getpid()).ppid()  # Identificamos el PID del proceso padre (cmd.exe) para aprovechar su consola existente.
+    except Exception:
+        parent_pid = 0  # Si psutil falla (procesos zombis o permisos), continuamos con cero para forzar AllocConsole en el residente.
+    payload = {  # Construimos el mensaje que viajará por el socket TCP local con todos los datos necesarios.
+        "token": CONSOLE_SERVER_TOKEN,  # Incluimos el token de autenticación compartido.
+        "command": "attach_console",  # Indicamos que se trata de la orden específica de adjuntar consola.
+        "host_pid": parent_pid,  # Transmitimos el PID del anfitrión detectado para intentar AttachConsole.
+        "helper_pid": os.getpid(),  # Enviamos también el PID de este auxiliar como respaldo.
+    }
+    try:
+        with socket.create_connection((CONSOLE_SERVER_HOST, CONSOLE_SERVER_PORT), timeout=2.0) as conn:  # Nos conectamos al servidor residente con timeout corto para no bloquear la UI.
+            conn.sendall(json.dumps(payload).encode("utf-8"))  # Serializamos el payload y lo enviamos completo.
+            conn.shutdown(socket.SHUT_WR)  # Cerramos el canal de escritura para señalar fin del mensaje y permitir al servidor responder.
+            respuesta = conn.recv(4096)  # Leemos la confirmación que indica si la operación fue aceptada.
+    except OSError:
+        return False  # Si no se pudo establecer la conexión, devolvemos False para que el llamador actúe en consecuencia.
+    if not respuesta:  # Si el servidor no devolvió nada, asumimos que algo falló.
+        return False  # Comunicamos que no hay éxito.
+    try:
+        data = json.loads(respuesta.decode("utf-8"))  # Parseamos la respuesta para inspeccionar el campo "ok".
+    except json.JSONDecodeError:
+        return False  # Una respuesta malformada implica fallo; devolvemos False.
+    return bool(data.get("ok"))  # Evaluamos el indicador de éxito y lo transformamos en bool explícito.
+
+
+def _inicializar_ipc_consola() -> bool:
+    """Prepara el servidor IPC o, si ya existe, actúa como mensajero para solicitar la consola."""
+    consola_presente = bool(KERNEL32.GetConsoleWindow())  # Detectamos si esta instancia ya tiene consola disponible (p.ej. cuando nos lanza cmd.exe directamente).
+    servidor: Optional[socket.socket] = None  # Socket que terminará escuchando peticiones si logramos reservar el puerto.
+    for intento in range(5):  # Intentamos hasta cinco veces reservar el puerto para tolerar estados TIME_WAIT tras reinicios rápidos.
+        servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # Creamos el socket para intentar asumir el rol de servidor residente.
+        servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Permitimos reusar el puerto rápidamente tras cierres recientes.
+        try:
+            servidor.bind((CONSOLE_SERVER_HOST, CONSOLE_SERVER_PORT))  # Intentamos reservar el puerto; si funciona somos la instancia principal.
+        except OSError as exc:
+            servidor.close()  # Liberamos el descriptor antes de reintentar o abortar, evitando fugas.
+            if exc.errno not in (errno.EADDRINUSE, errno.EACCES):  # Para errores inesperados (no solo puerto ocupado), registramos y seguimos sin IPC.
+                logger.error("No pude inicializar el servidor de consola: %s", exc)  # Dejamos constancia en el log para diagnóstico.
+                servidor = None  # Aclaramos que no conservamos el socket fallido.
+                break  # Salimos del bucle; continuaremos la ejecución principal sin IPC.
+            if not consola_presente:  # Si el puerto está ocupado pero no tenemos consola, asumimos que otra instancia sigue activa; no duplicamos procesos.
+                logger.info("Otra instancia de RAI ya está activa; no se iniciará un segundo proceso.")  # Informamos en logs y cancelamos el arranque duplicado.
+                return False  # Detenemos la ejecución de este proceso auxiliar.
+            if _enviar_solicitud_adjuntar_consola():  # Si venimos desde el menú Abrir terminal y la petición se procesó con éxito...
+                print("Adjuntando consola al proceso residente. Esta sesión auxiliar se cerrará automáticamente.", flush=True)  # Damos feedback inmediato en la CMD recién abierta.
+                return False  # Finalizamos esta instancia porque solo actuaba como mensajera.
+            logger.warning("No pude contactar al proceso residente (intento %s/5). Reintentando reservar el puerto...", intento + 1)  # Anotamos el fallo para análisis.
+            time.sleep(0.6)  # Esperamos un poco para que el SO libere recursos antes de volver a intentar la reserva.
+            continue  # Volvemos al principio del bucle para reintentar el bind.
+        else:
+            break  # El bind funcionó; salimos del bucle con el socket listo para escuchar.
+    else:
+        servidor = None  # Si agotamos los intentos sin éxito, dejamos el socket en None.
+
+    if servidor is None:  # Si no logramos reservar el puerto, continuamos sin IPC pero manteniendo la consola actual si existe.
+        if consola_presente and not _configurar_consola_actual(mostrar_banner=True):  # Tratamos de redirigir la consola actual aunque no tengamos canal IPC.
+            _abrir_powershell_fallback()  # Si tampoco pudimos configurar la consola, recurrimos al tail de PowerShell como última opción visible.
+        return True  # Continuamos ejecutando el cliente para no perder funcionalidad, aunque no podamos servir futuras peticiones Abrir terminal.
+
+    servidor.listen(5)  # Comenzamos a escuchar conexiones entrantes aceptando hasta 5 pendientes para tolerar clics repetidos rápidos.
+    global _console_server_socket, _console_server_thread  # Indicamos que modificaremos las referencias globales guardadas.
+    _console_server_socket = servidor  # Guardamos el socket activo para uso posterior y cierre ordenado.
+    hilo = threading.Thread(target=_bucle_servidor_consola, args=(servidor,), daemon=True)  # Creamos el hilo daemon que atenderá las solicitudes sin bloquear el hilo principal.
+    hilo.start()  # Lanzamos el hilo inmediatamente para que el canal IPC quede operativo.
+    _console_server_thread = hilo  # Mantenemos la referencia por si necesitamos inspeccionarlo (p.ej. en depuración).
+    atexit.register(_cerrar_servidor_consola)  # Registramos el cierre automático para liberar el puerto cuando el proceso termine.
+    if consola_presente:  # Si ya tenemos consola visible (modo interactivo desde cmd.exe), la configuramos de inmediato.
+        if not _configurar_consola_actual(mostrar_banner=True):  # Reutilizamos la misma rutina de redirección para que prints/logs fluyan y se vea el tail histórico.
+            _abrir_powershell_fallback()  # Si falló la configuración, abrimos el fallback para no dejar la ventana vacía.
+    return True  # Confirmamos que somos la instancia principal y que debemos continuar con la ejecución normal.
 
 
 def _normalizar(texto: str) -> str:
@@ -180,6 +412,43 @@ ATAJOS_VOZ: List[Dict[str, Any]] = [
         "patrones": [
             r"\b(bloquea|bloquear|bloqueame)\s+(el\s+)?equipo\b",
             r"\b(bloquea|bloquear)\s+(la\s+)?pantalla\b",
+        ],
+    },
+    {
+        "id": "nuevo_escritorio",
+        "descripcion": "Creando un escritorio nuevo.",
+        "combos": [("winleft", "ctrl", "d")],
+        "patrones": [
+            r"\b(crea|crear|creame|agrega|agregame|sum[aá]me)\s+(un|otro)\s+escritorio\b",
+            r"\b(nuevo|gener[aá])\s+escritorio\b",
+        ],
+    },
+    {
+        "id": "apagar_equipo",
+        "descripcion": "Preparando apagado del equipo.",
+        "combos": [],
+        "patrones": [
+            r"\b(apaga|apagar|apagame|apagalo|apaguen|apaguenla|apaguenlo)\s+(la\s+)?(computadora|pc|compu|equipo)\b",
+            r"\b(apaga|apagar)\s+todo\b",
+        ],
+        "manual_follow_up": True,
+    },
+    {
+        "id": "escritorio_derecha",
+        "descripcion": "Pasando al escritorio de la derecha.",
+        "combos": [("winleft", "ctrl", "right")],
+        "patrones": [
+            r"\b(pas[aá]|cambi[aá]|mueve(?:me)?|llev[aá](?:me)?)\s+(al|para)\s+(escritorio)\s+(de\s+)?(la\s+)?derecha\b",
+            r"\b(escritorio)\s+(siguiente|que\s+sigue)\b",
+        ],
+    },
+    {
+        "id": "escritorio_izquierda",
+        "descripcion": "Pasando al escritorio de la izquierda.",
+        "combos": [("winleft", "ctrl", "left")],
+        "patrones": [
+            r"\b(pas[aá]|cambi[aá]|mueve(?:me)?|llev[aá](?:me)?)\s+(al|para)\s+(escritorio)\s+(de\s+)?(la\s+)?izquierda\b",
+            r"\b(escritorio)\s+anterior\b",
         ],
     },
     {
@@ -758,12 +1027,6 @@ def generar_respuesta_con_cohere(mensaje: str) -> Optional[str]:
     _log_cohere_event("RESPUESTA_CONVERSACIONAL", texto)
     return texto
 
-
-
-
-
-
-
 def generar_redaccion_desde_memoria(nueva_instruccion: str) -> Optional[str]:
     """Ajusta/redacta un texto ya almacenado en memoria según un pedido adicional."""
     texto_actual = str(memoria_redaccion.get("texto") or "").strip()
@@ -1277,6 +1540,75 @@ def _ejecutar_combos_teclado(combos: List[Tuple[str, ...]]) -> bool:
         return False
 
 
+def _iniciar_confirmacion_apagado() -> bool:
+    global shutdown_confirmation_pending
+    with shutdown_confirmation_lock:
+        if shutdown_confirmation_pending:
+            hud.log("Necesito que confirmes si querés apagar el equipo.")
+            iniciar_follow_up(force_start=True)
+            return True
+        shutdown_confirmation_pending = True
+    hud.log("¿Seguro que querés ejecutar esta acción?")
+    iniciar_follow_up(force_start=True)
+    return True
+
+
+def _programar_apagado_confirmado() -> None:
+    global shutdown_timer
+
+    def _apagar() -> None:
+        logger.info("Ejecutando apagado del equipo solicitado por voz.")
+        try:
+            subprocess.run(["shutdown", "/s", "/t", "0"], check=False)
+        except Exception as exc:
+            logger.error("No pude apagar el equipo: %s", exc)
+            hud.log(f"No pude apagar el equipo: {exc}")
+
+    shutdown_timer = threading.Timer(5, _apagar)
+    shutdown_timer.start()
+
+
+def _procesar_confirmacion_apagado(mensaje: str) -> bool:
+    global shutdown_confirmation_pending, texto_acumulado, follow_up_mode
+    base = _sin_acentos(mensaje or "").strip()
+    if not base:
+        hud.log('Necesito que me confirmes con "sí" o "no".')
+        iniciar_follow_up(force_start=True)
+        return True
+
+    def contiene(palabras: Iterable[str]) -> bool:
+        return any(re.search(rf"\b{re.escape(opcion)}\b", base) for opcion in palabras)
+
+    afirmativos = ["si", "dale", "claro", "obvio", "confirmo", "por supuesto", "hazlo", "hacelo", "apagala", "apagalo"]
+    negativos = ["no", "mejor no", "cancelar", "cancela", "cancelo", "detene", "detenelo", "para"]
+
+    if contiene(afirmativos):
+        with shutdown_confirmation_lock:
+            shutdown_confirmation_pending = False
+        with follow_up_lock:
+            follow_up_mode = False
+        hud.log("Bueno, si insistís... Apagando en 5 segundos.")
+        registrar_accion({"tipo": "atajo", "id": "apagar_equipo", "descripcion": "Apagando el equipo en 5 segundos."})
+        _programar_apagado_confirmado()
+        texto_acumulado = ""
+        return True
+
+    if contiene(negativos):
+        with shutdown_confirmation_lock:
+            shutdown_confirmation_pending = False
+        with follow_up_lock:
+            follow_up_mode = False
+        hud.log("Listo, cancelo el apagado.")
+        threading.Timer(2, hud.ocultar).start()
+        texto_acumulado = ""
+        return True
+
+    hud.log('No te entendí. ¿Me confirmás con "sí" o "no"?')
+    iniciar_follow_up(force_start=True)
+    texto_acumulado = ""
+    return True
+
+
 def _detectar_atajo_teclado(texto: str) -> Optional[Dict[str, Any]]:
     if not texto:
         return None
@@ -1289,6 +1621,9 @@ def _detectar_atajo_teclado(texto: str) -> Optional[Dict[str, Any]]:
 
 
 def ejecutar_atajo_teclado(atajo: Dict[str, Any]) -> bool:
+    atajo_id = str(atajo.get("id") or "")
+    if atajo_id == "apagar_equipo":
+        return _iniciar_confirmacion_apagado()
     combos_raw = atajo.get("combos") or []
     combos: List[Tuple[str, ...]] = []
     for combo in combos_raw:
@@ -1690,6 +2025,11 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
         return
 
     mensaje = texto_acumulado.strip()
+    if shutdown_confirmation_pending:
+        if _procesar_confirmacion_apagado(mensaje):
+            texto_acumulado = ""
+            return
+
     if _es_pedido_repeticion(mensaje):
         ok, mensaje_historial = _repetir_ultima_accion()
         hud.log(mensaje_historial)
@@ -1771,14 +2111,15 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
     if interpret_tipo == "atajo":
         atajo_interpretado = _obtener_atajo_por_id((interpretacion or {}).get("atajo_id"))
         if atajo_interpretado and ejecutar_atajo_teclado(atajo_interpretado):
-            descripcion_atajo = atajo_interpretado.get("descripcion") or "Atajo ejecutado."
-            registrar_accion({
-                "tipo": "atajo",
-                "combos": atajo_interpretado.get("combos", []),
-                "descripcion": descripcion_atajo,
-            })
             texto_acumulado = ""
-            notificar_y_activar_follow_up(descripcion_atajo)
+            if not atajo_interpretado.get("manual_follow_up"):
+                descripcion_atajo = atajo_interpretado.get("descripcion") or "Atajo ejecutado."
+                registrar_accion({
+                    "tipo": "atajo",
+                    "combos": atajo_interpretado.get("combos", []),
+                    "descripcion": descripcion_atajo,
+                })
+                notificar_y_activar_follow_up(descripcion_atajo)
             return
         if interpretacion:
             logger.warning(
@@ -1804,9 +2145,14 @@ def enviar_mensaje_final(timeout: int = 5) -> None:  # timeout se mantiene por c
         if atajo:
             logger.info("Atajo de teclado detectado: %s", atajo.get("id"))
             if ejecutar_atajo_teclado(atajo):
-                registrar_accion({"tipo": "atajo", "combos": atajo.get("combos", []), "descripcion": atajo.get("descripcion")})
                 texto_acumulado = ""
-                notificar_y_activar_follow_up(atajo.get("descripcion") or "Atajo ejecutado.")
+                if not atajo.get("manual_follow_up"):
+                    registrar_accion({
+                        "tipo": "atajo",
+                        "combos": atajo.get("combos", []),
+                        "descripcion": atajo.get("descripcion"),
+                    })
+                    notificar_y_activar_follow_up(atajo.get("descripcion") or "Atajo ejecutado.")
                 return
             hud.log("No pude ejecutar el atajo.")
             texto_acumulado = ""
@@ -1922,4 +2268,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if not _inicializar_ipc_consola():  # Si la inicialización IPC devuelve False, somos una instancia auxiliar y debemos finalizar de inmediato.
+        sys.exit(0)  # Cerramos el proceso actual para evitar duplicar lógica cuando solo se pretendía adjuntar la consola.
+    main()  # Continuamos con la ejecución normal cuando actuamos como instancia principal.

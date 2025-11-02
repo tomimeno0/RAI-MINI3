@@ -11,7 +11,7 @@ out/
 .env
 .env.local
 .env.*.local
-
+.md
 # Python dependencies
 __pycache__/
 *.pyc
@@ -39,3 +39,9 @@ Thumbs.db
 # Misc
 *.bak
 *.tmp
+#agent
+*.pid
+*.seed
+*.pid.lock
+# Coverage directory
+coverage/
